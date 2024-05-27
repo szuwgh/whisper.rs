@@ -13,9 +13,29 @@ use std::thread::JoinHandle;
 use std::vec;
 use thiserror::Error;
 
-enum A {
-    A1(String),
-    A2(String),
+type GGMLFp16T = u16;
+
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum GGMLType {
+    GGML_TYPE_I8,
+    GGML_TYPE_I16,
+    GGML_TYPE_I32,
+    GGML_TYPE_F16,
+    GGML_TYPE_F32,
+    GGML_TYPE_COUNT,
+}
+
+const GGML_TYPE_SIZE: [usize; GGMLType::GGML_TYPE_COUNT as usize] = [
+    std::mem::size_of::<i8>(),
+    std::mem::size_of::<i16>(),
+    std::mem::size_of::<i32>(),
+    std::mem::size_of::<GGMLFp16T>(),
+    std::mem::size_of::<f32>(),
+];
+
+fn ggml_type_size(t: GGMLType) -> usize {
+    return GGML_TYPE_SIZE[t as usize];
 }
 
 macro_rules! function {
@@ -57,8 +77,9 @@ impl From<&str> for WsError {
 
 pub type WsResult<T> = Result<T, WsError>;
 
-#[derive(Hash, Eq, PartialEq, Debug)]
+#[derive(Hash, Eq, PartialEq, Debug, Default)]
 enum EModel {
+    #[default]
     Unknown,
     Tiny,
     Base,
@@ -96,11 +117,11 @@ lazy_static! {
 lazy_static! {
     static ref MEM_REQ_MEMORY: HashMap<EModel, usize> = {
         let mut map = HashMap::new();
-        map.insert(EModel::Tiny, 74 * MB);
-        map.insert(EModel::Base, 142 * MB);
-        map.insert(EModel::Small, 466 * MB);
-        map.insert(EModel::Medium, 1464 * MB);
-        map.insert(EModel::Large, 2952 * MB);
+        map.insert(EModel::Tiny, 12 * MB);
+        map.insert(EModel::Base, 24 * MB);
+        map.insert(EModel::Small, 70 * MB);
+        map.insert(EModel::Medium, 184 * MB);
+        map.insert(EModel::Large, 306 * MB);
         map
     };
 }
@@ -173,6 +194,7 @@ struct WhisperTokenData {
     vlen: f32, // voice length of the token
 }
 
+#[derive(Default)]
 struct WhisperContext {
     t_load_us: i64,
     t_mel_us: i64,
@@ -203,42 +225,6 @@ struct WhisperContext {
     tid_last: WhisperToken,
     energy: Vec<f32>,
     exp_n_audio_ctx: i32,
-}
-
-impl WhisperContext {
-    fn new() -> Self {
-        WhisperContext {
-            t_load_us: 0,
-            t_mel_us: 0,
-            t_sample_us: 0,
-            t_encode_us: 0,
-            t_decode_us: 0,
-            t_start_us: 0,
-        
-            buf_model: Vec::new(), // the model buffer is read-only and can be shared between processors
-            buf_memory: Vec::new(),
-            buf_compute:Vec::new(),
-            buf_compute_layer:Vec::new(),
-        
-            model: WhisperModel,
-            vocab: WhisperVocab,
-        
-            mel: WhisperMel,
-        
-            probs: Vec<f32>,
-            logits: Vec<f32>,
-        
-            result_all: Vec<WhisperSegment>,
-        
-            prompt_past: Vec<WhisperToken>,
-        
-            t_beg: i64,
-            t_last: i64,
-            tid_last: WhisperToken,
-            energy: Vec<f32>,
-            exp_n_audio_ctx: i32,
-        }
-    }
 }
 
 struct WhisperFilters {
@@ -313,10 +299,7 @@ impl Default for WhisperVocab {
 }
 
 impl WhisperVocab {
-    fn load<T: Read>(mut self, r: &mut T) -> WsResult<WhisperVocab> {
-        let n_vocab = r.read_i32::<Endian>()?;
-        println!("{}: n_vocab       = {}\n", function!(), n_vocab);
-        self.n_vocab = n_vocab;
+    fn load<T: Read>(mut self, n_vocab: i32, r: &mut T) -> WsResult<WhisperVocab> {
         for i in 0..n_vocab {
             let len: u32 = r.read_u32::<Endian>()?;
             let mut tmp = vec![0; len as usize];
@@ -328,6 +311,7 @@ impl WhisperVocab {
             self.token_to_id.insert(word.clone(), i);
             self.id_to_token.insert(i, word);
         }
+
         Ok(self)
     }
 
@@ -343,6 +327,7 @@ struct WhisperSegment {
     tokens: Vec<WhisperTokenData>,
 }
 
+#[derive(Default)]
 struct WhisperHparams {
     n_vocab: i32,
     n_audio_ctx: i32,
@@ -397,6 +382,40 @@ impl WhisperHparams {
     }
 }
 
+struct WhisperLayerEncoder {
+    // encoder.blocks.*.attn_ln
+    attn_ln_0_w: Arc<GGMLTensor>,
+    attn_ln_0_b: Arc<GGMLTensor>,
+
+    // encoder.blocks.*.attn.out
+    attn_ln_1_w: Arc<GGMLTensor>,
+    attn_ln_1_b: Arc<GGMLTensor>,
+
+    // encoder.blocks.*.attn.query
+    attn_q_w: Arc<GGMLTensor>,
+    attn_q_b: Arc<GGMLTensor>,
+
+    // encoder.blocks.*.attn.key
+    attn_k_w: Arc<GGMLTensor>,
+
+    // encoder.blocks.*.attn.value
+    attn_v_w: Arc<GGMLTensor>,
+    attn_v_b: Arc<GGMLTensor>,
+
+    // encoder.blocks.*.mlp_ln
+    mlp_ln_w: Arc<GGMLTensor>,
+    mlp_ln_b: Arc<GGMLTensor>,
+
+    // encoder.blocks.*.mlp.0
+    mlp_0_w: Arc<GGMLTensor>,
+    mlp_0_b: Arc<GGMLTensor>,
+
+    // encoder.blocks.*.mlp.2
+    mlp_1_w: Arc<GGMLTensor>,
+    mlp_1_b: Arc<GGMLTensor>,
+}
+
+#[derive(Default)]
 struct WhisperMel {
     n_len: usize,
     n_mel: usize,
@@ -406,6 +425,7 @@ struct WhisperMel {
 unsafe impl Send for MthVecF32 {}
 unsafe impl Sync for MthVecF32 {}
 
+#[derive(Default)]
 struct MthVecF32(UnsafeCell<Vec<f32>>);
 
 impl MthVecF32 {
@@ -424,6 +444,7 @@ fn open_file_stream(fname: &str) -> WsResult<BufReader<File>> {
     Ok(buf_reader)
 }
 
+#[derive(Default)]
 struct WhisperModel {
     mtype: EModel,
     hparams: WhisperHparams,
@@ -465,9 +486,32 @@ impl WhisperModel {
                 *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap()
             ) / MB
         );
+
+        wctx.buf_model
+            .resize(*MEM_REQ_MODEL.get(&mtype).unwrap(), 0u8);
+        wctx.buf_memory
+            .resize(*MEM_REQ_MEMORY.get(&mtype).unwrap(), 0u8);
+        wctx.buf_compute.resize(
+            std::cmp::max(
+                *MEM_REQ_ENCODE.get(&mtype).unwrap(),
+                *MEM_REQ_DECODE.get(&mtype).unwrap(),
+            ),
+            0u8,
+        );
+        wctx.buf_compute_layer.resize(
+            std::cmp::max(
+                *MEM_REQ_ENCODE_LAYER.get(&mtype).unwrap(),
+                *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap(),
+            ),
+            0u8,
+        );
+
         let filters = WhisperFilters::load(&mut fin)?;
-        let mut vocab = WhisperVocab::default().load(&mut fin)?;
-        if (vocab.is_multilingual()) {
+        let n_vocab = fin.read_i32::<Endian>()?;
+        println!("{}: n_vocab       = {}\n", function!(), n_vocab);
+        let mut vocab = WhisperVocab::default().load(n_vocab, &mut fin)?;
+        vocab.n_vocab = hparams.n_vocab;
+        if vocab.is_multilingual() {
             vocab.token_eot += 1;
             vocab.token_sot += 1;
             vocab.token_prev += 1;
@@ -475,22 +519,194 @@ impl WhisperModel {
             vocab.token_not += 1;
             vocab.token_beg += 1;
         }
-        // let buf_model = vec![0u8; *MEM_REQ_MODEL.get(&mtype).unwrap()];
-        // let buf_memory = vec![0u8; *MEM_REQ_MEMORY.get(&mtype).unwrap()];
-        // let buf_compute = vec![
-        //     0u8;
-        //     std::cmp::max(
-        //         *MEM_REQ_ENCODE.get(&mtype).unwrap(),
-        //         *MEM_REQ_DECODE.get(&mtype).unwrap()
-        //     )
-        // ];
-        // let buf_compute_layer = vec![
-        //     0u8;
-        //     std::cmp::max(
-        //         *MEM_REQ_ENCODE_LAYER.get(&mtype).unwrap(),
-        //         *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap()
-        //     )
-        // ];
+
+        if n_vocab < hparams.n_vocab {
+            println!(
+                "{}: adding {} extra tokens",
+                function!(),
+                hparams.n_vocab - n_vocab
+            );
+            for i in n_vocab..hparams.n_vocab {
+                let word = if i > vocab.token_beg {
+                    format!("[_TT_{}]", i - vocab.token_beg)
+                } else if i == vocab.token_eot {
+                    "[_EOT_]".to_string()
+                } else if i == vocab.token_sot {
+                    "[_SOT_]".to_string()
+                } else if i == vocab.token_prev {
+                    "[_PREV_]".to_string()
+                } else if i == vocab.token_not {
+                    "[_NOT_]".to_string()
+                } else if i == vocab.token_beg {
+                    "[_BEG_]".to_string()
+                } else {
+                    format!("[_extra_token_{}]", i)
+                };
+                vocab.token_to_id.insert(word.clone(), i);
+                vocab.id_to_token.insert(i, word);
+            }
+        }
+
+        {
+            let mem_required = wctx.buf_model.len()
+                + wctx.buf_memory.len()
+                + wctx.buf_compute.len()
+                + wctx.buf_compute_layer.len();
+            println!(
+                "{}: mem_required  = {:7.2} MB",
+                function!(),
+                mem_required as f64 / 1024.0 / 1024.0
+            );
+        }
+
+        let wtype = if hparams.f16 == 1 {
+            GGMLType::GGML_TYPE_F16
+        } else {
+            GGMLType::GGML_TYPE_F32
+        };
+
+        let mut ctx_size = 0usize;
+        let mut ctx_mem_size = 0usize;
+        {
+            let n_vocab = hparams.n_vocab as usize;
+            let n_audio_ctx = hparams.n_audio_ctx as usize;
+            let n_audio_state = hparams.n_audio_state as usize;
+            let n_audio_layer = hparams.n_audio_layer as usize;
+
+            let n_text_ctx = hparams.n_text_ctx as usize;
+            let n_text_state = hparams.n_text_state as usize;
+            let n_text_layer = hparams.n_text_layer as usize;
+            let n_mels = hparams.n_mels as usize;
+            // encoder
+            {
+                ctx_size += n_audio_ctx * n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_pe;
+
+                ctx_size += 3 * n_mels * n_audio_state * ggml_type_size(wtype); // e_conv_1_w
+                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_conv_1_b
+
+                ctx_size += 3 * n_audio_state * n_audio_state * ggml_type_size(wtype); // e_conv_2_w
+                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_conv_2_b
+
+                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_ln_w;
+                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32);
+            }
+
+            // decoder
+            {
+                // TODO: F16 .. maybe not?
+                ctx_size += n_text_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // d_pe;
+
+                ctx_size += n_vocab * n_text_state * ggml_type_size(wtype.clone()); // d_te;
+
+                ctx_size += n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // d_ln_w;
+                ctx_size += n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32);
+                // d_ln_b;
+            }
+
+            // encoder layers
+            {
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_w
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_b
+
+                ctx_size +=
+                    n_audio_layer * (4 * n_audio_state * n_audio_state * ggml_type_size(wtype)); // mlp_0_w
+                ctx_size +=
+                    n_audio_layer * (4 * n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_0_b
+
+                ctx_size +=
+                    n_audio_layer * (4 * n_audio_state * n_audio_state * ggml_type_size(wtype)); // mlp_1_w
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_1_b
+
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_w
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_b
+
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_q_w
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_q_b
+
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_k_w
+
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_v_w
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_v_b
+
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_ln_1_w
+                ctx_size +=
+                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32));
+                // attn_ln_1_b
+            }
+
+            // decoder layers
+            {
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_b
+
+                ctx_size +=
+                    n_text_layer * (4 * n_text_state * n_text_state * ggml_type_size(wtype)); // mlp_0_w
+                ctx_size +=
+                    n_text_layer * (4 * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_0_b
+
+                ctx_size +=
+                    n_text_layer * (4 * n_text_state * n_text_state * ggml_type_size(wtype)); // mlp_1_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_1_b
+
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_b
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_q_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_q_b
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_k_w
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_v_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_v_b
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_ln_1_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_1_b
+                                                                                                     //
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_ln_0_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_ln_0_b
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_q_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_q_b
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_k_w
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_v_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_v_b
+
+                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_ln_1_w
+                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32));
+                // cross_attn_ln_1_b
+            }
+
+            ctx_mem_size +=
+                n_text_layer * n_text_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_k
+            ctx_mem_size +=
+                n_text_layer * n_text_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_v
+
+            ctx_mem_size +=
+                n_text_layer * n_audio_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_cross_k
+            ctx_mem_size +=
+                n_text_layer * n_audio_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_cross_v
+
+            ctx_size += (15 + 15 * n_audio_layer + 24 * n_text_layer) * 256; // object overhead
+
+            println!(
+                "{}: ggml ctx size = {:7.2}  MB\n",
+                function!(),
+                ctx_size as f32 / (1024.0 * 1024.0),
+            );
+        }
+
+        {
+            let layers_encoder = vec![;n_audio_layer];
+        }
 
         todo!()
     }
@@ -695,9 +911,11 @@ mod tests {
     #[test]
     fn test_load_model() {
         let file_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
-        match WhisperModel::load(file_path) {
-            Ok(_) => {}
-            Err(e) => println!("{}", e),
-        }
+        let mut wctx = WhisperContext::default();
+        let m = WhisperModel::load(file_path, &mut wctx);
+        // match WhisperModel::load(file_path) {
+        //     Ok(_) => {}
+        //     Err(e) => println!("{}", e),
+        // }
     }
 }
