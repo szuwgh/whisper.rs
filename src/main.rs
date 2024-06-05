@@ -1,6 +1,7 @@
 use byteorder::LittleEndian;
 use byteorder::ReadBytesExt;
 use core::cell::UnsafeCell;
+use galois::Tensor as GsTensor;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::fs::File;
@@ -194,7 +195,6 @@ struct WhisperTokenData {
     vlen: f32, // voice length of the token
 }
 
-#[derive(Default)]
 struct WhisperContext {
     t_load_us: i64,
     t_mel_us: i64,
@@ -227,6 +227,7 @@ struct WhisperContext {
     exp_n_audio_ctx: i32,
 }
 
+#[derive(Default)]
 struct WhisperFilters {
     n_mel: i32,
     n_ff: i32,
@@ -384,35 +385,35 @@ impl WhisperHparams {
 
 struct WhisperLayerEncoder {
     // encoder.blocks.*.attn_ln
-    attn_ln_0_w: Arc<GGMLTensor>,
-    attn_ln_0_b: Arc<GGMLTensor>,
+    attn_ln_0_w: Arc<GsTensor>,
+    attn_ln_0_b: Arc<GsTensor>,
 
     // encoder.blocks.*.attn.out
-    attn_ln_1_w: Arc<GGMLTensor>,
-    attn_ln_1_b: Arc<GGMLTensor>,
+    attn_ln_1_w: Arc<GsTensor>,
+    attn_ln_1_b: Arc<GsTensor>,
 
     // encoder.blocks.*.attn.query
-    attn_q_w: Arc<GGMLTensor>,
-    attn_q_b: Arc<GGMLTensor>,
+    attn_q_w: Arc<GsTensor>,
+    attn_q_b: Arc<GsTensor>,
 
     // encoder.blocks.*.attn.key
-    attn_k_w: Arc<GGMLTensor>,
+    attn_k_w: Arc<GsTensor>,
 
     // encoder.blocks.*.attn.value
-    attn_v_w: Arc<GGMLTensor>,
-    attn_v_b: Arc<GGMLTensor>,
+    attn_v_w: Arc<GsTensor>,
+    attn_v_b: Arc<GsTensor>,
 
     // encoder.blocks.*.mlp_ln
-    mlp_ln_w: Arc<GGMLTensor>,
-    mlp_ln_b: Arc<GGMLTensor>,
+    mlp_ln_w: Arc<GsTensor>,
+    mlp_ln_b: Arc<GsTensor>,
 
     // encoder.blocks.*.mlp.0
-    mlp_0_w: Arc<GGMLTensor>,
-    mlp_0_b: Arc<GGMLTensor>,
+    mlp_0_w: Arc<GsTensor>,
+    mlp_0_b: Arc<GsTensor>,
 
     // encoder.blocks.*.mlp.2
-    mlp_1_w: Arc<GGMLTensor>,
-    mlp_1_b: Arc<GGMLTensor>,
+    mlp_1_w: Arc<GsTensor>,
+    mlp_1_b: Arc<GsTensor>,
 }
 
 #[derive(Default)]
@@ -444,10 +445,16 @@ fn open_file_stream(fname: &str) -> WsResult<BufReader<File>> {
     Ok(buf_reader)
 }
 
-#[derive(Default)]
 struct WhisperModel {
     mtype: EModel,
     hparams: WhisperHparams,
+    filters: WhisperFilters,
+    e_pe: Arc<GsTensor>,
+    e_conv_1_w: Arc<GsTensor>,
+    e_conv_1_b: Arc<GsTensor>,
+    e_conv_2_w: Arc<GsTensor>,
+    e_conv_2_b: Arc<GsTensor>,
+    e_ln_w: Arc<GsTensor>,
 }
 
 impl WhisperModel {
@@ -704,8 +711,11 @@ impl WhisperModel {
             );
         }
 
+        // prepare memory for the weights
         {
-            let layers_encoder = vec![;n_audio_layer];
+            let layers_encoder: Vec<WhisperLayerEncoder> = Vec::new();
+            // encoder
+            {}
         }
 
         todo!()
