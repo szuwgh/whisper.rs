@@ -454,7 +454,32 @@ struct WhisperModel {
     e_conv_1_b: Arc<GsTensor>,
     e_conv_2_w: Arc<GsTensor>,
     e_conv_2_b: Arc<GsTensor>,
+
     e_ln_w: Arc<GsTensor>,
+    e_ln_b: Arc<GsTensor>,
+
+    // decoder.positional_embedding
+    d_pe: Arc<GsTensor>, // DD
+
+    // decoder.token_embedding
+    d_te: Arc<GsTensor>, // DD
+
+    // decoder.ln
+    d_ln_w: Arc<GsTensor>, // DD
+    d_ln_b: Arc<GsTensor>, // DD
+
+    layers_encoder: Vec<WhisperLayerEncoder>,
+    layers_decoder: Vec<WhisperLayerEncoder>,
+
+    // key + value memory
+    memory_k: Arc<GsTensor>,
+    memory_v: Arc<GsTensor>,
+
+    memory_cross_k: Arc<GsTensor>,
+    memory_cross_v: Arc<GsTensor>,
+
+    // context
+    tensors: HashMap<String, Arc<GsTensor>>,
 }
 
 impl WhisperModel {
