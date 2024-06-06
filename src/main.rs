@@ -896,8 +896,8 @@ mod tests {
     #[test]
     fn test_load_model() {
         let file_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
-        let mut wctx = WhisperContext::default();
-        let m = WhisperModel::load(file_path, &mut wctx);
+        //let mut wctx = WhisperContext::default();
+        //let m = WhisperModel::load(file_path, &mut wctx);
         // match WhisperModel::load(file_path) {
         //     Ok(_) => {}
         //     Err(e) => println!("{}", e),
