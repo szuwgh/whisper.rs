@@ -1,7 +1,9 @@
 use byteorder::LittleEndian;
 use byteorder::ReadBytesExt;
 use core::cell::UnsafeCell;
+use galois::Shape;
 use galois::Tensor as GsTensor;
+use galois::{DType, GS_TYPE_SIZE};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::fs::File;
@@ -14,29 +16,29 @@ use std::thread::JoinHandle;
 use std::vec;
 use thiserror::Error;
 
-type GGMLFp16T = u16;
+// type GGMLFp16T = u16;
 
-#[derive(Clone, Copy)]
-#[repr(usize)]
-enum GGMLType {
-    GGML_TYPE_I8,
-    GGML_TYPE_I16,
-    GGML_TYPE_I32,
-    GGML_TYPE_F16,
-    GGML_TYPE_F32,
-    GGML_TYPE_COUNT,
-}
+// #[derive(Clone, Copy)]
+// #[repr(usize)]
+// enum DType {
+//     GGML_TYPE_I8,
+//     GGML_TYPE_I16,
+//     GGML_TYPE_I32,
+//     F16,
+//     F32,
+//     GGML_TYPE_COUNT,
+// }
 
-const GGML_TYPE_SIZE: [usize; GGMLType::GGML_TYPE_COUNT as usize] = [
-    std::mem::size_of::<i8>(),
-    std::mem::size_of::<i16>(),
-    std::mem::size_of::<i32>(),
-    std::mem::size_of::<GGMLFp16T>(),
-    std::mem::size_of::<f32>(),
-];
+// const get_type_size: [usize; DType::GGML_TYPE_COUNT as usize] = [
+//     std::mem::size_of::<i8>(),
+//     std::mem::size_of::<i16>(),
+//     std::mem::size_of::<i32>(),
+//     std::mem::size_of::<GGMLFp16T>(),
+//     std::mem::size_of::<f32>(),
+// ];
 
-fn ggml_type_size(t: GGMLType) -> usize {
-    return GGML_TYPE_SIZE[t as usize];
+fn get_type_size(t: DType) -> usize {
+    return GS_TYPE_SIZE[t as usize];
 }
 
 macro_rules! function {
@@ -62,6 +64,8 @@ pub enum WsError {
     UnexpectIO(io::Error),
     #[error("invalid model file '{0}' (bad magic)\n")]
     BadMagic(String),
+    #[error("not enough space in the context's memory pool\n")]
+    NotEnoughSpace,
 }
 
 impl From<IOError> for WsError {
@@ -175,7 +179,67 @@ lazy_static! {
     };
 }
 
-use std::time::Duration;
+fn new_tensor_2d(
+    ctx: &mut TensorContext,
+    buf: &[u8],
+    dtype: DType,
+    ne0: usize,
+    ne1: usize,
+) -> WsResult<GsTensor> {
+    let dim = [ne0, ne1];
+    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
+}
+
+fn new_tensor_3d(
+    ctx: &mut TensorContext,
+    buf: &[u8],
+    dtype: DType,
+    ne0: usize,
+    ne1: usize,
+    ne2: usize,
+) -> WsResult<GsTensor> {
+    let dim = [ne0, ne1, ne2];
+    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
+}
+
+fn new_tensor_4d(
+    ctx: &mut TensorContext,
+    buf: &[u8],
+    dtype: DType,
+    ne0: usize,
+    ne1: usize,
+    ne3: usize,
+    ne4: usize,
+) -> WsResult<GsTensor> {
+    let dim = [ne0, ne1];
+    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
+}
+
+fn new_tensor(
+    ctx: &mut TensorContext,
+    buf: &[u8],
+    dtype: DType,
+    shape: Shape,
+) -> WsResult<GsTensor> {
+    let cur_offset = ctx.offset;
+    let cur_size = ctx.size;
+    let size_needed: usize = get_type_size(dtype) * shape.size();
+    if cur_offset + size_needed > buf.len() {
+        return Err(WsError::NotEnoughSpace);
+    }
+    let t = GsTensor::from_bytes(&buf[cur_offset..cur_offset + size_needed], shape, dtype);
+    ctx.offset = cur_offset + size_needed;
+    ctx.size = size_needed;
+    ctx.n_objects += 1;
+    Ok(t)
+}
+
+#[derive(Default)]
+struct TensorContext {
+    offset: usize,
+    size: usize,
+    n_objects: usize,
+}
 
 type WhisperToken = i32;
 
@@ -429,7 +493,7 @@ struct WhisperModel {
 
     n_loaded: usize,
 
-    tensors: HashMap<String, GsTensor>,
+    tensors: HashMap<String, usize>,
 }
 
 impl WhisperModel {
@@ -542,9 +606,9 @@ impl WhisperModel {
         }
 
         let wtype = if hparams.f16 == 1 {
-            GGMLType::GGML_TYPE_F16
+            DType::F16
         } else {
-            GGMLType::GGML_TYPE_F32
+            DType::F32
         };
 
         let mut ctx_size = 0usize;
@@ -561,121 +625,105 @@ impl WhisperModel {
             let n_mels = hparams.n_mels as usize;
             // encoder
             {
-                ctx_size += n_audio_ctx * n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_pe;
+                ctx_size += n_audio_ctx * n_audio_state * get_type_size(DType::F32); // e_pe;
 
-                ctx_size += 3 * n_mels * n_audio_state * ggml_type_size(wtype); // e_conv_1_w
-                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_conv_1_b
+                ctx_size += 3 * n_mels * n_audio_state * get_type_size(wtype); // e_conv_1_w
+                ctx_size += n_audio_state * get_type_size(DType::F32); // e_conv_1_b
 
-                ctx_size += 3 * n_audio_state * n_audio_state * ggml_type_size(wtype); // e_conv_2_w
-                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_conv_2_b
+                ctx_size += 3 * n_audio_state * n_audio_state * get_type_size(wtype); // e_conv_2_w
+                ctx_size += n_audio_state * get_type_size(DType::F32); // e_conv_2_b
 
-                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // e_ln_w;
-                ctx_size += n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32);
+                ctx_size += n_audio_state * get_type_size(DType::F32); // e_ln_w;
+                ctx_size += n_audio_state * get_type_size(DType::F32);
             }
 
             // decoder
             {
                 // TODO: F16 .. maybe not?
-                ctx_size += n_text_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // d_pe;
+                ctx_size += n_text_ctx * n_text_state * get_type_size(DType::F32); // d_pe;
 
-                ctx_size += n_vocab * n_text_state * ggml_type_size(wtype.clone()); // d_te;
+                ctx_size += n_vocab * n_text_state * get_type_size(wtype.clone()); // d_te;
 
-                ctx_size += n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32); // d_ln_w;
-                ctx_size += n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32);
+                ctx_size += n_text_state * get_type_size(DType::F32); // d_ln_w;
+                ctx_size += n_text_state * get_type_size(DType::F32);
                 // d_ln_b;
             }
 
             // encoder layers
             {
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_w
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_b
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32)); // mlp_ln_w
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32)); // mlp_ln_b
 
                 ctx_size +=
-                    n_audio_layer * (4 * n_audio_state * n_audio_state * ggml_type_size(wtype)); // mlp_0_w
-                ctx_size +=
-                    n_audio_layer * (4 * n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_0_b
+                    n_audio_layer * (4 * n_audio_state * n_audio_state * get_type_size(wtype)); // mlp_0_w
+                ctx_size += n_audio_layer * (4 * n_audio_state * get_type_size(DType::F32)); // mlp_0_b
 
                 ctx_size +=
-                    n_audio_layer * (4 * n_audio_state * n_audio_state * ggml_type_size(wtype)); // mlp_1_w
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_1_b
+                    n_audio_layer * (4 * n_audio_state * n_audio_state * get_type_size(wtype)); // mlp_1_w
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32)); // mlp_1_b
 
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_w
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_b
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32)); // attn_ln_0_w
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32)); // attn_ln_0_b
 
-                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_q_w
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_q_b
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * get_type_size(wtype)); // attn_q_w
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32)); // attn_q_b
 
-                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_k_w
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * get_type_size(wtype)); // attn_k_w
 
-                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_v_w
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_v_b
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * get_type_size(wtype)); // attn_v_w
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32)); // attn_v_b
 
-                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * ggml_type_size(wtype)); // attn_ln_1_w
-                ctx_size +=
-                    n_audio_layer * (n_audio_state * ggml_type_size(GGMLType::GGML_TYPE_F32));
+                ctx_size += n_audio_layer * (n_audio_state * n_audio_state * get_type_size(wtype)); // attn_ln_1_w
+                ctx_size += n_audio_layer * (n_audio_state * get_type_size(DType::F32));
                 // attn_ln_1_b
             }
 
             // decoder layers
             {
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_ln_b
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // mlp_ln_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // mlp_ln_b
 
-                ctx_size +=
-                    n_text_layer * (4 * n_text_state * n_text_state * ggml_type_size(wtype)); // mlp_0_w
-                ctx_size +=
-                    n_text_layer * (4 * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_0_b
+                ctx_size += n_text_layer * (4 * n_text_state * n_text_state * get_type_size(wtype)); // mlp_0_w
+                ctx_size += n_text_layer * (4 * n_text_state * get_type_size(DType::F32)); // mlp_0_b
 
-                ctx_size +=
-                    n_text_layer * (4 * n_text_state * n_text_state * ggml_type_size(wtype)); // mlp_1_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // mlp_1_b
+                ctx_size += n_text_layer * (4 * n_text_state * n_text_state * get_type_size(wtype)); // mlp_1_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // mlp_1_b
 
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_0_b
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // attn_ln_0_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // attn_ln_0_b
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_q_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_q_b
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // attn_q_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // attn_q_b
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_k_w
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // attn_k_w
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_v_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_v_b
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // attn_v_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // attn_v_b
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // attn_ln_1_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // attn_ln_1_b
-                                                                                                     //
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_ln_0_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_ln_0_b
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // attn_ln_1_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // attn_ln_1_b
+                                                                                       //
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // cross_attn_ln_0_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // cross_attn_ln_0_b
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_q_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_q_b
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // cross_attn_q_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // cross_attn_q_b
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_k_w
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // cross_attn_k_w
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_v_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32)); // cross_attn_v_b
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // cross_attn_v_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32)); // cross_attn_v_b
 
-                ctx_size += n_text_layer * (n_text_state * n_text_state * ggml_type_size(wtype)); // cross_attn_ln_1_w
-                ctx_size += n_text_layer * (n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F32));
+                ctx_size += n_text_layer * (n_text_state * n_text_state * get_type_size(wtype)); // cross_attn_ln_1_w
+                ctx_size += n_text_layer * (n_text_state * get_type_size(DType::F32));
                 // cross_attn_ln_1_b
             }
 
-            ctx_mem_size +=
-                n_text_layer * n_text_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_k
-            ctx_mem_size +=
-                n_text_layer * n_text_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_v
+            ctx_mem_size += n_text_layer * n_text_ctx * n_text_state * get_type_size(DType::F16); // memory_k
+            ctx_mem_size += n_text_layer * n_text_ctx * n_text_state * get_type_size(DType::F16); // memory_v
 
-            ctx_mem_size +=
-                n_text_layer * n_audio_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_cross_k
-            ctx_mem_size +=
-                n_text_layer * n_audio_ctx * n_text_state * ggml_type_size(GGMLType::GGML_TYPE_F16); // memory_cross_v
+            ctx_mem_size += n_text_layer * n_audio_ctx * n_text_state * get_type_size(DType::F16); // memory_cross_k
+            ctx_mem_size += n_text_layer * n_audio_ctx * n_text_state * get_type_size(DType::F16); // memory_cross_v
 
             ctx_size += (15 + 15 * n_audio_layer + 24 * n_text_layer) * 256; // object overhead
 
@@ -685,12 +733,47 @@ impl WhisperModel {
                 ctx_size as f32 / (1024.0 * 1024.0),
             );
         }
-
+        let mut tensors: HashMap<&'static str, usize> = HashMap::new();
+        let mut weights: Vec<GsTensor> = Vec::new();
         // prepare memory for the weights
         {
-            let layers_encoder: Vec<WhisperLayerEncoder> = Vec::new();
+            let mut tensor_ctx = TensorContext::default();
+            let n_vocab = hparams.n_vocab as usize;
+            let n_audio_ctx = hparams.n_audio_ctx as usize;
+            let n_audio_state = hparams.n_audio_state as usize;
+            let n_audio_layer = hparams.n_audio_layer as usize;
+
+            let n_text_ctx = hparams.n_text_ctx as usize;
+            let n_text_state = hparams.n_text_state as usize;
+            let n_text_layer = hparams.n_text_layer as usize;
+            let n_mels = hparams.n_mels as usize;
+
+            let layers_encoder: Vec<WhisperLayerEncoder> = Vec::with_capacity(n_audio_layer);
             // encoder
-            {}
+            let e_pe = new_tensor_2d(
+                &mut tensor_ctx,
+                &wctx.buf_model,
+                DType::F32,
+                n_audio_state,
+                n_audio_ctx,
+            );
+            let e_conv_1_w = new_tensor_3d(
+                &mut tensor_ctx,
+                &wctx.buf_model,
+                wtype,
+                3,
+                n_mels,
+                n_audio_state,
+            );
+            tensors.insert("encoder.positional_embedding", 0);
+            tensors.insert("encoder.conv1.weight", 1);
+            tensors.insert("encoder.conv1.bias", 2);
+
+            tensors.insert("encoder.conv2.weight", 3);
+            tensors.insert("encoder.conv2.bias", 4);
+
+            tensors.insert("encoder.ln_post.weight", 5);
+            tensors.insert("encoder.ln_post.bias", 6);
         }
 
         todo!()
