@@ -383,38 +383,8 @@ impl WhisperHparams {
     }
 }
 
-struct WhisperLayerEncoder {
-    // encoder.blocks.*.attn_ln
-    attn_ln_0_w: Arc<GsTensor>,
-    attn_ln_0_b: Arc<GsTensor>,
-
-    // encoder.blocks.*.attn.out
-    attn_ln_1_w: Arc<GsTensor>,
-    attn_ln_1_b: Arc<GsTensor>,
-
-    // encoder.blocks.*.attn.query
-    attn_q_w: Arc<GsTensor>,
-    attn_q_b: Arc<GsTensor>,
-
-    // encoder.blocks.*.attn.key
-    attn_k_w: Arc<GsTensor>,
-
-    // encoder.blocks.*.attn.value
-    attn_v_w: Arc<GsTensor>,
-    attn_v_b: Arc<GsTensor>,
-
-    // encoder.blocks.*.mlp_ln
-    mlp_ln_w: Arc<GsTensor>,
-    mlp_ln_b: Arc<GsTensor>,
-
-    // encoder.blocks.*.mlp.0
-    mlp_0_w: Arc<GsTensor>,
-    mlp_0_b: Arc<GsTensor>,
-
-    // encoder.blocks.*.mlp.2
-    mlp_1_w: Arc<GsTensor>,
-    mlp_1_b: Arc<GsTensor>,
-}
+struct WhisperLayerEncoder(Box<[GsTensor; 15]>);
+struct WhisperLayerDecoder(Box<[GsTensor; 24]>);
 
 #[derive(Default)]
 struct WhisperMel {
@@ -449,12 +419,17 @@ struct WhisperModel {
     mtype: EModel,
     hparams: WhisperHparams,
     filters: WhisperFilters,
-    e_pe: Arc<GsTensor>,
-    e_conv_1_w: Arc<GsTensor>,
-    e_conv_1_b: Arc<GsTensor>,
-    e_conv_2_w: Arc<GsTensor>,
-    e_conv_2_b: Arc<GsTensor>,
-    e_ln_w: Arc<GsTensor>,
+
+    weights: Box<[GsTensor; 11]>,
+
+    layers_encoder: Vec<WhisperLayerEncoder>,
+    layers_decoder: Vec<WhisperLayerDecoder>,
+
+    kv_memory: Box<[GsTensor; 14]>,
+
+    n_loaded: usize,
+
+    tensors: HashMap<String, GsTensor>,
 }
 
 impl WhisperModel {
