@@ -291,6 +291,65 @@ struct WhisperContext {
     exp_n_audio_ctx: i32,
 }
 
+impl WhisperContext {
+    fn new(fname: &str) -> WsResult<WhisperContext> {
+        let mut fin = open_file_stream(fname)?;
+        let magic = fin.read_u32::<Endian>()?;
+        if magic != MAGIC {
+            return Err(WsError::BadMagic(fname.to_string()));
+        }
+        let hparams = WhisperHparams::load(r)?;
+        let mtype = EModel::from_audio_layer(hparams.n_audio_layer);
+        println!("{}: type           = {:?}\n", function!(), mtype);
+        println!(
+            "{}: buf_model_size           = {:?}MB\n",
+            function!(),
+            *MEM_REQ_MODEL.get(&mtype).unwrap() / MB
+        );
+        println!(
+            "{}: buf_memory_size          = {:?}MB\n",
+            function!(),
+            *MEM_REQ_MEMORY.get(&mtype).unwrap() / MB
+        );
+        println!(
+            "{}: buf_compute_size         = {:?}MB\n",
+            function!(),
+            std::cmp::max(
+                *MEM_REQ_ENCODE.get(&mtype).unwrap(),
+                *MEM_REQ_DECODE.get(&mtype).unwrap()
+            ) / MB
+        );
+        println!(
+            "{}: buf_compute_layer_size   = {:?}MB\n",
+            function!(),
+            std::cmp::max(
+                *MEM_REQ_ENCODE_LAYER.get(&mtype).unwrap(),
+                *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap()
+            ) / MB
+        );
+
+        wctx.buf_model
+            .resize(*MEM_REQ_MODEL.get(&mtype).unwrap(), 0u8);
+        wctx.buf_memory
+            .resize(*MEM_REQ_MEMORY.get(&mtype).unwrap(), 0u8);
+        wctx.buf_compute.resize(
+            std::cmp::max(
+                *MEM_REQ_ENCODE.get(&mtype).unwrap(),
+                *MEM_REQ_DECODE.get(&mtype).unwrap(),
+            ),
+            0u8,
+        );
+        wctx.buf_compute_layer.resize(
+            std::cmp::max(
+                *MEM_REQ_ENCODE_LAYER.get(&mtype).unwrap(),
+                *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap(),
+            ),
+            0u8,
+        );
+        todo!()
+    }
+}
+
 #[derive(Default)]
 struct WhisperFilters {
     n_mel: i32,
@@ -489,7 +548,7 @@ struct WhisperModel {
     layers_encoder: Vec<WhisperLayerEncoder>,
     layers_decoder: Vec<WhisperLayerDecoder>,
 
-    kv_memory: Box<[GsTensor; 14]>,
+    kv_memory: Box<[GsTensor; 4]>,
 
     n_loaded: usize,
 
@@ -497,65 +556,13 @@ struct WhisperModel {
 }
 
 impl WhisperModel {
-    fn load(fname: &str, wctx: &mut WhisperContext) -> WsResult<WhisperModel> {
-        let mut fin = open_file_stream(fname)?;
-        let magic = fin.read_u32::<Endian>()?;
-        if magic != MAGIC {
-            return Err(WsError::BadMagic(fname.to_string()));
-        }
-        let hparams = WhisperHparams::load(&mut fin)?;
-        let mtype = EModel::from_audio_layer(hparams.n_audio_layer);
-        println!("{}: type           = {:?}\n", function!(), mtype);
-        println!(
-            "{}: buf_model_size           = {:?}MB\n",
-            function!(),
-            *MEM_REQ_MODEL.get(&mtype).unwrap() / MB
-        );
-        println!(
-            "{}: buf_memory_size          = {:?}MB\n",
-            function!(),
-            *MEM_REQ_MEMORY.get(&mtype).unwrap() / MB
-        );
-        println!(
-            "{}: buf_compute_size         = {:?}MB\n",
-            function!(),
-            std::cmp::max(
-                *MEM_REQ_ENCODE.get(&mtype).unwrap(),
-                *MEM_REQ_DECODE.get(&mtype).unwrap()
-            ) / MB
-        );
-        println!(
-            "{}: buf_compute_layer_size   = {:?}MB\n",
-            function!(),
-            std::cmp::max(
-                *MEM_REQ_ENCODE_LAYER.get(&mtype).unwrap(),
-                *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap()
-            ) / MB
-        );
+    fn load<T: Read>(r: &mut T) -> WsResult<WhisperModel> {
+        //wctx: &mut WhisperContext
 
-        wctx.buf_model
-            .resize(*MEM_REQ_MODEL.get(&mtype).unwrap(), 0u8);
-        wctx.buf_memory
-            .resize(*MEM_REQ_MEMORY.get(&mtype).unwrap(), 0u8);
-        wctx.buf_compute.resize(
-            std::cmp::max(
-                *MEM_REQ_ENCODE.get(&mtype).unwrap(),
-                *MEM_REQ_DECODE.get(&mtype).unwrap(),
-            ),
-            0u8,
-        );
-        wctx.buf_compute_layer.resize(
-            std::cmp::max(
-                *MEM_REQ_ENCODE_LAYER.get(&mtype).unwrap(),
-                *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap(),
-            ),
-            0u8,
-        );
-
-        let filters = WhisperFilters::load(&mut fin)?;
-        let n_vocab = fin.read_i32::<Endian>()?;
+        let filters = WhisperFilters::load(r)?;
+        let n_vocab = r.read_i32::<Endian>()?;
         println!("{}: n_vocab       = {}\n", function!(), n_vocab);
-        let mut vocab = WhisperVocab::default().load(n_vocab, &mut fin)?;
+        let mut vocab = WhisperVocab::default().load(n_vocab, r)?;
         vocab.n_vocab = hparams.n_vocab;
         if vocab.is_multilingual() {
             vocab.token_eot += 1;
@@ -768,14 +775,29 @@ impl WhisperModel {
             tensors.insert("encoder.positional_embedding", 0);
             tensors.insert("encoder.conv1.weight", 1);
             tensors.insert("encoder.conv1.bias", 2);
-
             tensors.insert("encoder.conv2.weight", 3);
             tensors.insert("encoder.conv2.bias", 4);
-
             tensors.insert("encoder.ln_post.weight", 5);
             tensors.insert("encoder.ln_post.bias", 6);
         }
 
+        // load weights
+        {
+            let total_size: usize = 0;
+
+            //model.n_loaded = 0;
+            let j: usize = 0;
+            while true {
+                let n_dims: usize = 0;
+                let length: usize = 0;
+                let ftype: usize = 0;
+                let n_dims = fin.read_u32::<Endian>()?;
+                break;
+                // read_safe(fin, n_dims);
+                // read_safe(fin, length);
+                // read_safe(fin, ftype);
+            }
+        }
         todo!()
     }
 }
@@ -979,8 +1001,8 @@ mod tests {
     #[test]
     fn test_load_model() {
         let file_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
-        //let mut wctx = WhisperContext::default();
-        //let m = WhisperModel::load(file_path, &mut wctx);
+        let mut wctx = WhisperContext::default();
+        let m = WhisperModel::load(file_path, &mut wctx);
         // match WhisperModel::load(file_path) {
         //     Ok(_) => {}
         //     Err(e) => println!("{}", e),
