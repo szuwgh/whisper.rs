@@ -8,9 +8,11 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
+use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Error as IOError;
 use std::io::Read;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::vec;
@@ -66,6 +68,8 @@ pub enum WsError {
     BadMagic(String),
     #[error("not enough space in the context's memory pool\n")]
     NotEnoughSpace,
+    #[error("unknown tensor '{0}' in model file\n")]
+    UnknownTensor(String),
 }
 
 impl From<IOError> for WsError {
@@ -177,6 +181,16 @@ lazy_static! {
         map.insert(EModel::Large, 110 * MB);
         map
     };
+}
+
+fn new_tensor_1d(
+    ctx: &mut TensorContext,
+    buf: &[u8],
+    dtype: DType,
+    ne0: usize,
+) -> WsResult<GsTensor> {
+    let dim = [ne0];
+    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor_2d(
@@ -298,7 +312,7 @@ impl WhisperContext {
         if magic != MAGIC {
             return Err(WsError::BadMagic(fname.to_string()));
         }
-        let hparams = WhisperHparams::load(r)?;
+        let hparams = WhisperHparams::load(&mut fin)?;
         let mtype = EModel::from_audio_layer(hparams.n_audio_layer);
         println!("{}: type           = {:?}\n", function!(), mtype);
         println!(
@@ -328,24 +342,34 @@ impl WhisperContext {
             ) / MB
         );
 
-        wctx.buf_model
-            .resize(*MEM_REQ_MODEL.get(&mtype).unwrap(), 0u8);
-        wctx.buf_memory
-            .resize(*MEM_REQ_MEMORY.get(&mtype).unwrap(), 0u8);
-        wctx.buf_compute.resize(
+        let buf_model = vec![0u8; *MEM_REQ_MODEL.get(&mtype).unwrap()];
+        let buf_memory = vec![0u8; *MEM_REQ_MEMORY.get(&mtype).unwrap()];
+
+        let buf_compute = vec![
+            0u8;
             std::cmp::max(
                 *MEM_REQ_ENCODE.get(&mtype).unwrap(),
                 *MEM_REQ_DECODE.get(&mtype).unwrap(),
-            ),
-            0u8,
-        );
-        wctx.buf_compute_layer.resize(
+            )
+        ];
+        let buf_compute_layer = vec![
+            0u8;
             std::cmp::max(
                 *MEM_REQ_ENCODE_LAYER.get(&mtype).unwrap(),
                 *MEM_REQ_DECODE_LAYER.get(&mtype).unwrap(),
-            ),
-            0u8,
-        );
+            )
+        ];
+
+        {
+            let mem_required =
+                buf_model.len() + buf_memory.len() + buf_compute.len() + buf_compute_layer.len();
+            println!(
+                "{}: mem_required  = {:7.2} MB",
+                function!(),
+                mem_required as f64 / 1024.0 / 1024.0
+            );
+        }
+        WhisperModel::load(&mut fin, mtype, hparams, &buf_model);
         todo!()
     }
 }
@@ -551,14 +575,15 @@ struct WhisperModel {
     kv_memory: Box<[GsTensor; 4]>,
 
     n_loaded: usize,
-
-    tensors: HashMap<String, usize>,
 }
 
 impl WhisperModel {
-    fn load<T: Read>(r: &mut T) -> WsResult<WhisperModel> {
-        //wctx: &mut WhisperContext
-
+    fn load<T: Read + BufRead>(
+        r: &mut T,
+        mtype: EModel,
+        hparams: WhisperHparams,
+        buf_model: &[u8],
+    ) -> WsResult<WhisperModel> {
         let filters = WhisperFilters::load(r)?;
         let n_vocab = r.read_i32::<Endian>()?;
         println!("{}: n_vocab       = {}\n", function!(), n_vocab);
@@ -598,18 +623,6 @@ impl WhisperModel {
                 vocab.token_to_id.insert(word.clone(), i);
                 vocab.id_to_token.insert(i, word);
             }
-        }
-
-        {
-            let mem_required = wctx.buf_model.len()
-                + wctx.buf_memory.len()
-                + wctx.buf_compute.len()
-                + wctx.buf_compute_layer.len();
-            println!(
-                "{}: mem_required  = {:7.2} MB",
-                function!(),
-                mem_required as f64 / 1024.0 / 1024.0
-            );
         }
 
         let wtype = if hparams.f16 == 1 {
@@ -740,10 +753,11 @@ impl WhisperModel {
                 ctx_size as f32 / (1024.0 * 1024.0),
             );
         }
-        let mut tensors: HashMap<&'static str, usize> = HashMap::new();
-        let mut weights: Vec<GsTensor> = Vec::new();
+
+        // let mut weights: Vec<GsTensor> = Box::new();
         // prepare memory for the weights
-        {
+        let whisper_mode = {
+            let mut tensors: HashMap<&'static str, *const GsTensor> = HashMap::new();
             let mut tensor_ctx = TensorContext::default();
             let n_vocab = hparams.n_vocab as usize;
             let n_audio_ctx = hparams.n_audio_ctx as usize;
@@ -759,39 +773,134 @@ impl WhisperModel {
             // encoder
             let e_pe = new_tensor_2d(
                 &mut tensor_ctx,
-                &wctx.buf_model,
+                buf_model,
                 DType::F32,
                 n_audio_state,
                 n_audio_ctx,
-            );
-            let e_conv_1_w = new_tensor_3d(
+            )?;
+            let e_conv_1_w =
+                new_tensor_3d(&mut tensor_ctx, buf_model, wtype, 3, n_mels, n_audio_state)?;
+            let e_conv_1_b =
+                new_tensor_2d(&mut tensor_ctx, buf_model, DType::F32, 1, n_audio_state)?;
+
+            let e_conv_2_w = new_tensor_3d(
                 &mut tensor_ctx,
-                &wctx.buf_model,
+                buf_model,
                 wtype,
                 3,
-                n_mels,
                 n_audio_state,
-            );
-            tensors.insert("encoder.positional_embedding", 0);
-            tensors.insert("encoder.conv1.weight", 1);
-            tensors.insert("encoder.conv1.bias", 2);
-            tensors.insert("encoder.conv2.weight", 3);
-            tensors.insert("encoder.conv2.bias", 4);
-            tensors.insert("encoder.ln_post.weight", 5);
-            tensors.insert("encoder.ln_post.bias", 6);
-        }
+                n_audio_state,
+            )?;
+            let e_conv_2_b =
+                new_tensor_2d(&mut tensor_ctx, buf_model, DType::F32, 1, n_audio_state)?;
 
+            let e_ln_w = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+            let e_ln_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+
+            let d_pe = new_tensor_2d(
+                &mut tensor_ctx,
+                buf_model,
+                DType::F32,
+                n_text_state,
+                n_text_ctx,
+            )?;
+
+            let d_te = new_tensor_2d(&mut tensor_ctx, buf_model, wtype, n_text_state, n_vocab)?;
+            let d_ln_w = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+            let d_ln_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+
+            let weights = Box::new([
+                e_pe, e_conv_1_w, e_conv_1_b, e_conv_2_w, e_conv_2_b, e_ln_w, e_ln_b, d_pe, d_te,
+                d_ln_w, d_ln_b,
+            ]);
+            tensors.insert(
+                "encoder.positional_embedding",
+                weights.get(0).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "encoder.conv1.weight",
+                weights.get(1).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "encoder.conv1.bias",
+                weights.get(2).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "encoder.conv2.weight",
+                weights.get(3).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "encoder.conv2.bias",
+                weights.get(4).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "encoder.ln_post.weight",
+                weights.get(5).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "encoder.ln_post.bias",
+                weights.get(6).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "decoder.positional_embedding",
+                weights.get(7).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "decoder.token_embedding.weight",
+                weights.get(8).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "decoder.ln.weight",
+                weights.get(9).unwrap() as *const GsTensor,
+            );
+            tensors.insert(
+                "decoder.ln.bias",
+                weights.get(10).unwrap() as *const GsTensor,
+            );
+            println!("d_pe dim:{:?}", weights.get(7).unwrap().dim());
+            WhisperModel {
+                mtype: mtype,
+                hparams: hparams,
+                filters: filters,
+            }
+        };
         // load weights
         {
             let total_size: usize = 0;
 
             //model.n_loaded = 0;
             let j: usize = 0;
-            while true {
-                let n_dims: usize = 0;
-                let length: usize = 0;
-                let ftype: usize = 0;
-                let n_dims = fin.read_u32::<Endian>()?;
+            loop {
+                let n_dims = r.read_i32::<Endian>()?;
+                let length = r.read_i32::<Endian>()?;
+                let ftype = r.read_i32::<Endian>()?;
+                println!("n_dims:{}", n_dims);
+                println!("length:{}", length);
+                println!("ftype:{}", ftype);
+                if r.fill_buf()?.is_empty() {
+                    println!("break");
+                    break;
+                }
+
+                let mut nelements: i32 = 1;
+                let mut ne: [i32; 3] = [1, 1, 1];
+                // let n_dims = 3; // Assume this value is set appropriately
+                for i in 0..n_dims as usize {
+                    ne[i] = r.read_i32::<Endian>()?;
+                    nelements *= ne[i];
+                }
+                //  println!("nelements:{}", nelements);
+                let mut buffer = vec![0; length as usize];
+                r.read_exact(&mut buffer)?;
+                let name = String::from_utf8_lossy(&buffer).to_string();
+                let ref_tensor = tensors
+                    .get(name.as_str())
+                    .ok_or(WsError::UnknownTensor(name.clone()))?;
+                println!("name:{}", name);
+                if let Some(tensor) = unsafe { (ref_tensor.as_ref()) } {
+                    println!("Referenced struct: {:?}", tensor.dim());
+                }
+
                 break;
                 // read_safe(fin, n_dims);
                 // read_safe(fin, length);
@@ -1001,8 +1110,8 @@ mod tests {
     #[test]
     fn test_load_model() {
         let file_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
-        let mut wctx = WhisperContext::default();
-        let m = WhisperModel::load(file_path, &mut wctx);
+        let mut wctx = WhisperContext::new(file_path);
+        //  let m = WhisperModel::load(file_path, &mut wctx);
         // match WhisperModel::load(file_path) {
         //     Ok(_) => {}
         //     Err(e) => println!("{}", e),
