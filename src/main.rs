@@ -369,7 +369,7 @@ impl WhisperContext {
                 mem_required as f64 / 1024.0 / 1024.0
             );
         }
-        WhisperModel::load(&mut fin, mtype, hparams, &buf_model);
+        WhisperModel::load(&mut fin, mtype, hparams, &buf_model)?;
         todo!()
     }
 }
@@ -530,7 +530,38 @@ impl WhisperHparams {
     }
 }
 
-struct WhisperLayerEncoder(Box<[GsTensor; 15]>);
+struct WhisperLayerEncoder {
+    // encoder.blocks.*.attn_ln
+    attn_ln_0_w: GsTensor,
+    attn_ln_0_b: GsTensor,
+
+    // encoder.blocks.*.attn.out
+    attn_ln_1_w: GsTensor,
+    attn_ln_1_b: GsTensor,
+
+    // encoder.blocks.*.attn.query
+    attn_q_w: GsTensor,
+    attn_q_b: GsTensor,
+
+    // encoder.blocks.*.attn.key
+    attn_k_w: GsTensor,
+
+    // encoder.blocks.*.attn.value
+    attn_v_w: GsTensor,
+    attn_v_b: GsTensor,
+
+    // encoder.blocks.*.mlp_ln
+    mlp_ln_w: GsTensor,
+    mlp_ln_b: GsTensor,
+
+    // encoder.blocks.*.mlp.0
+    mlp_0_w: GsTensor,
+    mlp_0_b: GsTensor,
+
+    // encoder.blocks.*.mlp.2
+    mlp_1_w: GsTensor,
+    mlp_1_b: GsTensor,
+}
 struct WhisperLayerDecoder(Box<[GsTensor; 24]>);
 
 #[derive(Default)]
@@ -567,13 +598,28 @@ struct WhisperModel {
     hparams: WhisperHparams,
     filters: WhisperFilters,
 
-    weights: Box<[GsTensor; 11]>,
+    e_pe: GsTensor,
+    // encoder.conv1
+    e_conv_1_w: GsTensor,
+    e_conv_1_b: GsTensor,
+    // encoder.conv2
+    e_conv_2_w: GsTensor,
+    e_conv_2_b: GsTensor,
+    // encoder.ln_post
+    e_ln_w: GsTensor,
+    e_ln_b: GsTensor,
+    // decoder.positional_embedding
+    d_pe: GsTensor,
+    // decoder.token_embedding
+    d_te: GsTensor,
+    // decoder.ln
+    d_ln_w: GsTensor,
+    d_ln_b: GsTensor,
 
-    layers_encoder: Vec<WhisperLayerEncoder>,
-    layers_decoder: Vec<WhisperLayerDecoder>,
+    // layers_encoder: Vec<WhisperLayerEncoder>,
+    // layers_decoder: Vec<WhisperLayerDecoder>,
 
-    kv_memory: Box<[GsTensor; 4]>,
-
+    // kv_memory: Box<[GsTensor; 4]>,
     n_loaded: usize,
 }
 
@@ -753,11 +799,9 @@ impl WhisperModel {
                 ctx_size as f32 / (1024.0 * 1024.0),
             );
         }
+        let mut tensors: HashMap<&'static str, *const GsTensor> = HashMap::new();
 
-        // let mut weights: Vec<GsTensor> = Box::new();
-        // prepare memory for the weights
         let whisper_mode = {
-            let mut tensors: HashMap<&'static str, *const GsTensor> = HashMap::new();
             let mut tensor_ctx = TensorContext::default();
             let n_vocab = hparams.n_vocab as usize;
             let n_audio_ctx = hparams.n_audio_ctx as usize;
@@ -769,7 +813,6 @@ impl WhisperModel {
             let n_text_layer = hparams.n_text_layer as usize;
             let n_mels = hparams.n_mels as usize;
 
-            let layers_encoder: Vec<WhisperLayerEncoder> = Vec::with_capacity(n_audio_layer);
             // encoder
             let e_pe = new_tensor_2d(
                 &mut tensor_ctx,
@@ -809,59 +852,187 @@ impl WhisperModel {
             let d_ln_w = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
             let d_ln_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
 
-            let weights = Box::new([
-                e_pe, e_conv_1_w, e_conv_1_b, e_conv_2_w, e_conv_2_b, e_ln_w, e_ln_b, d_pe, d_te,
-                d_ln_w, d_ln_b,
-            ]);
-            tensors.insert(
-                "encoder.positional_embedding",
-                weights.get(0).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "encoder.conv1.weight",
-                weights.get(1).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "encoder.conv1.bias",
-                weights.get(2).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "encoder.conv2.weight",
-                weights.get(3).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "encoder.conv2.bias",
-                weights.get(4).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "encoder.ln_post.weight",
-                weights.get(5).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "encoder.ln_post.bias",
-                weights.get(6).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "decoder.positional_embedding",
-                weights.get(7).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "decoder.token_embedding.weight",
-                weights.get(8).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "decoder.ln.weight",
-                weights.get(9).unwrap() as *const GsTensor,
-            );
-            tensors.insert(
-                "decoder.ln.bias",
-                weights.get(10).unwrap() as *const GsTensor,
-            );
-            println!("d_pe dim:{:?}", weights.get(7).unwrap().dim());
+            // let weights = Box::new([
+            //     e_pe, e_conv_1_w, e_conv_1_b, e_conv_2_w, e_conv_2_b, e_ln_w, e_ln_b, d_pe, d_te,
+            //     d_ln_w, d_ln_b,
+            // ]);
+            tensors.insert("encoder.positional_embedding", &e_pe as *const GsTensor);
+            tensors.insert("encoder.conv1.weight", &e_conv_1_w as *const GsTensor);
+            tensors.insert("encoder.conv1.bias", &e_conv_1_b as *const GsTensor);
+            tensors.insert("encoder.conv2.weight", &e_conv_2_w as *const GsTensor);
+            tensors.insert("encoder.conv2.bias", &e_conv_2_b as *const GsTensor);
+            tensors.insert("encoder.ln_post.weight", &e_ln_w as *const GsTensor);
+            tensors.insert("encoder.ln_post.bias", &e_ln_b as *const GsTensor);
+            tensors.insert("decoder.positional_embedding", &d_pe as *const GsTensor);
+            tensors.insert("decoder.token_embedding.weight", &d_te as *const GsTensor);
+            tensors.insert("decoder.ln.weight", &d_ln_w as *const GsTensor);
+            tensors.insert("decoder.ln.bias", &d_ln_b as *const GsTensor);
+
+            let mut layers_encoder: Vec<WhisperLayerEncoder> = Vec::with_capacity(n_audio_layer);
+            let mut layers_decoder: Vec<WhisperLayerEncoder> = Vec::with_capacity(n_text_layer);
+            for i in 0..n_audio_layer {
+                let mlp_ln_w =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let mlp_ln_b =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let mlp_0_w = new_tensor_2d(
+                    &mut tensor_ctx,
+                    buf_model,
+                    wtype,
+                    n_audio_state,
+                    4 * n_audio_state,
+                )?;
+                let mlp_0_b =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, 4 * n_audio_state)?;
+                let mlp_1_w = new_tensor_2d(
+                    &mut tensor_ctx,
+                    buf_model,
+                    wtype,
+                    4 * n_audio_state,
+                    n_audio_state,
+                )?;
+                let mlp_1_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let attn_ln_0_w =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let attn_ln_0_b =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let attn_q_w = new_tensor_2d(
+                    &mut tensor_ctx,
+                    buf_model,
+                    wtype,
+                    n_audio_state,
+                    n_audio_state,
+                )?;
+                let attn_q_b =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+
+                let attn_k_w = new_tensor_2d(
+                    &mut tensor_ctx,
+                    buf_model,
+                    wtype,
+                    n_audio_state,
+                    n_audio_state,
+                )?;
+
+                let attn_v_w = new_tensor_2d(
+                    &mut tensor_ctx,
+                    buf_model,
+                    wtype,
+                    n_audio_state,
+                    n_audio_state,
+                )?;
+                let attn_v_b =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+
+                let attn_ln_1_w = new_tensor_2d(
+                    &mut tensor_ctx,
+                    buf_model,
+                    wtype,
+                    n_audio_state,
+                    n_audio_state,
+                )?;
+                let attn_ln_1_b =
+                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+
+                tensors.insert(
+                    &format!("encoder.blocks.{}.mlp_ln.weight", i),
+                    &mlp_ln_w as *const GsTensor,
+                );
+
+                tensors.insert(
+                    &format!("encoder.blocks.{}.mlp_ln.bias", i),
+                    &mlp_ln_b as *const GsTensor,
+                );
+
+                tensors.insert(
+                    &format!("encoder.blocks.{}.mlp.0.weight", i),
+                    &mlp_0_w as *const GsTensor,
+                );
+                tensors.insert(
+                    &format!("encoder.blocks.{}.mlp.0.bias", i),
+                    &mlp_0_b as *const GsTensor,
+                );
+
+                tensors.insert(
+                    &format!("encoder.blocks.{}.mlp.2.weight", i),
+                    &mlp_1_w as *const GsTensor,
+                );
+                model.tensors["encoder.blocks." + std::to_string(i) + ".mlp.2.bias"] =
+                    layer.mlp_1_b;
+
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn_ln.weight"] =
+                    layer.attn_ln_0_w;
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn_ln.bias"] =
+                    layer.attn_ln_0_b;
+
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn.query.weight"] =
+                    layer.attn_q_w;
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn.query.bias"] =
+                    layer.attn_q_b;
+
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn.key.weight"] =
+                    layer.attn_k_w;
+
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn.value.weight"] =
+                    layer.attn_v_w;
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn.value.bias"] =
+                    layer.attn_v_b;
+
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn.out.weight"] =
+                    layer.attn_ln_1_w;
+                model.tensors["encoder.blocks." + std::to_string(i) + ".attn.out.bias"] =
+                    layer.attn_ln_1_b;
+
+                layers_encoder.push(WhisperLayerEncoder {
+                    // encoder.blocks.*.attn_ln
+                    attn_ln_0_w,
+                    attn_ln_0_b,
+
+                    // encoder.blocks.*.attn.out
+                    attn_ln_1_w,
+                    attn_ln_1_b,
+
+                    // encoder.blocks.*.attn.query
+                    attn_q_w,
+                    attn_q_b,
+
+                    // encoder.blocks.*.attn.key
+                    attn_k_w,
+
+                    // encoder.blocks.*.attn.value
+                    attn_v_w,
+                    attn_v_b,
+
+                    // encoder.blocks.*.mlp_ln
+                    mlp_ln_w,
+                    mlp_ln_b,
+
+                    // encoder.blocks.*.mlp.0
+                    mlp_0_w,
+                    mlp_0_b,
+
+                    // encoder.blocks.*.mlp.2
+                    mlp_1_w,
+                    mlp_1_b,
+                })
+            }
+
             WhisperModel {
                 mtype: mtype,
                 hparams: hparams,
                 filters: filters,
+                e_pe,
+                e_conv_1_w,
+                e_conv_1_b,
+                e_conv_2_w,
+                e_conv_2_b,
+                e_ln_w,
+                e_ln_b,
+                d_pe,
+                d_te,
+                d_ln_w,
+                d_ln_b,
+                n_loaded: 1,
             }
         };
         // load weights
@@ -898,10 +1069,11 @@ impl WhisperModel {
                     .ok_or(WsError::UnknownTensor(name.clone()))?;
                 println!("name:{}", name);
                 if let Some(tensor) = unsafe { (ref_tensor.as_ref()) } {
+                    r.read_exact(tensor.as_bytes_mut())?;
                     println!("Referenced struct: {:?}", tensor.dim());
                 }
 
-                break;
+                //  break;
                 // read_safe(fin, n_dims);
                 // read_safe(fin, length);
                 // read_safe(fin, ftype);
@@ -1109,12 +1281,36 @@ mod tests {
 
     #[test]
     fn test_load_model() {
-        let file_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
-        let mut wctx = WhisperContext::new(file_path);
+        println!("xxe");
+        let file_path = "/opt/cproject/ggml-tiny.en.bin";
+        let mut wctx = WhisperContext::new(file_path).unwrap();
         //  let m = WhisperModel::load(file_path, &mut wctx);
         // match WhisperModel::load(file_path) {
         //     Ok(_) => {}
         //     Err(e) => println!("{}", e),
         // }
+    }
+
+    struct A {
+        a: i32,
+        name: String,
+    }
+
+    struct B {
+        a: A,
+    }
+
+    #[test]
+    fn test_a() {
+        let x = A {
+            a: 5,
+            name: "123".to_string(),
+        };
+        let y = &x as *const A;
+        let b = B { a: x };
+
+        if let Some(a1) = unsafe { y.as_ref() } {
+            println!("{:?}", a1.name);
+        }
     }
 }
