@@ -76,6 +76,8 @@ pub enum WsError {
     WrongSizeTensor(String, usize, usize),
     #[error("tensor {0} has wrong shape in model file, got:{1:?}, expected:{2:?}\n")]
     WrongShapeTensor(String, Vec<usize>, Vec<usize>),
+    #[error("tensor {0} has wrong bytes in model file, got:{1:?}, expected:{2:?}\n")]
+    WrongBytesTensor(String, usize, usize),
 }
 
 impl From<IOError> for WsError {
@@ -845,7 +847,7 @@ impl WhisperModel {
         }
         let mut tensors: HashMap<String, *const GsTensor> = HashMap::new();
 
-        let whisper_mode = {
+        let mut whisper_mode = {
             let mut tensor_ctx = TensorContext::default();
             let n_vocab = hparams.n_vocab as usize;
             let n_audio_ctx = hparams.n_audio_ctx as usize;
@@ -1367,7 +1369,7 @@ impl WhisperModel {
         };
         // load weights
         {
-            let total_size: usize = 0;
+            let mut total_size: usize = 0;
 
             //model.n_loaded = 0;
             let j: usize = 0;
@@ -1375,13 +1377,6 @@ impl WhisperModel {
                 let n_dims = r.read_i32::<Endian>()?;
                 let length = r.read_i32::<Endian>()?;
                 let ftype = r.read_i32::<Endian>()?;
-                println!("n_dims:{}", n_dims);
-                println!("length:{}", length);
-                println!("ftype:{}", ftype);
-                if r.fill_buf()?.is_empty() {
-                    println!("break");
-                    break;
-                }
 
                 let mut nelements: usize = 1;
                 let mut ne: [usize; 3] = [1, 1, 1];
@@ -1397,8 +1392,8 @@ impl WhisperModel {
                 let ref_tensor = tensors
                     .get(name.as_str())
                     .ok_or(WsError::UnknownTensor(name.clone()))?;
-                //println!("name:{}", name);
-                if let Some(tensor) = unsafe { (ref_tensor.as_ref()) } {
+
+                if let Some(tensor) = unsafe { ref_tensor.as_ref() } {
                     if tensor.elem_count() != nelements {
                         return Err(WsError::WrongSizeTensor(
                             name,
@@ -1407,21 +1402,54 @@ impl WhisperModel {
                         ));
                     }
                     let shape = tensor.dim().shape().as_slice();
-                    if shape[0] != ne[0] || shape[1] != ne[1] || shape[2] != ne[2] {
-                        return Err(WsError::WrongShapeTensor(name, shape.to_vec(), ne.to_vec()));
+                    for i in 0..shape.len() {
+                        if shape[i] != ne[i] {
+                            return Err(WsError::WrongShapeTensor(
+                                name,
+                                shape.to_vec(),
+                                ne.to_vec(),
+                            ));
+                        }
+                    }
+                    let bpe = if ftype == 0 {
+                        std::mem::size_of::<f32>()
+                    } else {
+                        std::mem::size_of::<galois::F16>()
+                    };
+                    if nelements * bpe != tensor.nbytes() {
+                        return Err(WsError::WrongBytesTensor(
+                            name,
+                            tensor.nbytes(),
+                            nelements * bpe,
+                        ));
                     }
                     r.read_exact(tensor.as_bytes_mut())?;
-                    println!("Referenced struct: {:?}", tensor.dim());
+                    println!("name:{}", name);
+                    total_size += tensor.nbytes();
+                    whisper_mode.n_loaded += 1;
+                    match r.fill_buf() {
+                        Ok(r) => {
+                            if r.len() < 12 {
+                                break;
+                            }
+                        }
+                        Err(e) => match e.kind() {
+                            std::io::ErrorKind::UnexpectedEof => break,
+                            _ => return Err(WsError::UnexpectIO(e)),
+                        },
+                    }
+
+                    // println!("Referenced struct: {:?}", tensor.dim());
                 } else {
                     println!("break");
                     return Err(WsError::BadRefTensor(name));
                 }
-
-                //  break;
-                // read_safe(fin, n_dims);
-                // read_safe(fin, length);
-                // read_safe(fin, ftype);
             }
+            println!(
+                "{}: model size    = {:7.2} MB",
+                function!(),
+                total_size as f32 / 1024.0 / 1024.0
+            );
         }
         todo!()
     }
@@ -1626,7 +1654,7 @@ mod tests {
     #[test]
     fn test_load_model() {
         println!("xxe");
-        let file_path = "/opt/cproject/ggml-tiny.en.bin";
+        let file_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
         let mut wctx = WhisperContext::new(file_path).unwrap();
         //  let m = WhisperModel::load(file_path, &mut wctx);
         // match WhisperModel::load(file_path) {
