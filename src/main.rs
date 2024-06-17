@@ -39,6 +39,12 @@ use thiserror::Error;
 //     std::mem::size_of::<f32>(),
 // ];
 
+const WHISPER_SAMPLE_RATE: usize = 16000;
+const WHISPER_N_FFT: usize = 400;
+const WHISPER_N_MEL: usize = 80;
+const WHISPER_HOP_LENGTH: usize = 160;
+const WHISPER_CHUNK_SIZE: usize = 30;
+
 fn get_type_size(t: DType) -> usize {
     return GS_TYPE_SIZE[t as usize];
 }
@@ -377,8 +383,79 @@ impl WhisperContext {
                 mem_required as f64 / 1024.0 / 1024.0
             );
         }
-        WhisperModel::load(&mut fin, mtype, hparams, &buf_model)?;
-        todo!()
+        let filters = WhisperFilters::load(&mut fin)?;
+        let n_vocab = fin.read_i32::<Endian>()?;
+        let mut vocab = WhisperVocab::default().load(n_vocab, &mut fin)?;
+        vocab.n_vocab = hparams.n_vocab;
+        if vocab.is_multilingual() {
+            vocab.token_eot += 1;
+            vocab.token_sot += 1;
+            vocab.token_prev += 1;
+            vocab.token_solm += 1;
+            vocab.token_not += 1;
+            vocab.token_beg += 1;
+        }
+
+        if n_vocab < hparams.n_vocab {
+            println!(
+                "{}: adding {} extra tokens",
+                function!(),
+                hparams.n_vocab - n_vocab
+            );
+            for i in n_vocab..hparams.n_vocab {
+                let word = if i > vocab.token_beg {
+                    format!("[_TT_{}]", i - vocab.token_beg)
+                } else if i == vocab.token_eot {
+                    "[_EOT_]".to_string()
+                } else if i == vocab.token_sot {
+                    "[_SOT_]".to_string()
+                } else if i == vocab.token_prev {
+                    "[_PREV_]".to_string()
+                } else if i == vocab.token_not {
+                    "[_NOT_]".to_string()
+                } else if i == vocab.token_beg {
+                    "[_BEG_]".to_string()
+                } else {
+                    format!("[_extra_token_{}]", i)
+                };
+                vocab.token_to_id.insert(word.clone(), i);
+                vocab.id_to_token.insert(i, word);
+            }
+        }
+        println!("{}: n_vocab       = {}\n", function!(), n_vocab);
+        let whisper_model =
+            WhisperModel::load(&mut fin, mtype, hparams, filters, &buf_model, &buf_memory)?;
+        Ok(WhisperContext {
+            t_load_us: 0,
+            t_mel_us: 0,
+            t_sample_us: 0,
+            t_encode_us: 0,
+            t_decode_us: 0,
+            t_start_us: 0,
+
+            buf_model: buf_model, // the model buffer is read-only and can be shared between processors
+            buf_memory: buf_memory,
+            buf_compute: buf_compute,
+            buf_compute_layer: buf_compute_layer,
+
+            model: whisper_model,
+            vocab: vocab,
+
+            mel: WhisperMel::new(),
+
+            probs: Vec::new(),
+            logits: Vec::new(),
+
+            result_all: Vec::new(),
+
+            prompt_past: Vec::new(),
+
+            t_beg: 0,
+            t_last: 0,
+            tid_last: 0,
+            energy: Vec::new(),
+            exp_n_audio_ctx: 0,
+        })
     }
 }
 
@@ -617,6 +694,16 @@ struct WhisperMel {
     data: Arc<MthVecF32>,
 }
 
+impl WhisperMel {
+    fn new() -> WhisperMel {
+        WhisperMel {
+            n_len: 0,
+            n_mel: 0,
+            data: Arc::new(MthVecF32(UnsafeCell::new(Vec::new()))),
+        }
+    }
+}
+
 unsafe impl Send for MthVecF32 {}
 unsafe impl Sync for MthVecF32 {}
 
@@ -624,11 +711,11 @@ unsafe impl Sync for MthVecF32 {}
 struct MthVecF32(UnsafeCell<Vec<f32>>);
 
 impl MthVecF32 {
-    pub(crate) fn borrow(&self) -> &Vec<f32> {
-        unsafe { &*self.0.get() }
+    pub(crate) unsafe fn borrow(&self) -> &Vec<f32> {
+        &*self.0.get()
     }
-    pub(crate) fn borrow_mut(&self) -> &mut Vec<f32> {
-        unsafe { &mut *self.0.get() }
+    pub(crate) unsafe fn borrow_mut(&self) -> &mut Vec<f32> {
+        &mut *self.0.get()
     }
 }
 
@@ -665,6 +752,12 @@ struct WhisperModel {
     layers_encoder: Vec<WhisperLayerEncoder>,
     layers_decoder: Vec<WhisperLayerDecoder>,
 
+    memory_k: GsTensor,
+    memory_v: GsTensor,
+
+    memory_cross_k: GsTensor,
+    memory_cross_v: GsTensor,
+
     // kv_memory: Box<[GsTensor; 4]>,
     n_loaded: usize,
 }
@@ -674,49 +767,10 @@ impl WhisperModel {
         r: &mut T,
         mtype: EModel,
         hparams: WhisperHparams,
+        filters: WhisperFilters,
         buf_model: &[u8],
+        buf_memory: &[u8],
     ) -> WsResult<WhisperModel> {
-        let filters = WhisperFilters::load(r)?;
-        let n_vocab = r.read_i32::<Endian>()?;
-        println!("{}: n_vocab       = {}\n", function!(), n_vocab);
-        let mut vocab = WhisperVocab::default().load(n_vocab, r)?;
-        vocab.n_vocab = hparams.n_vocab;
-        if vocab.is_multilingual() {
-            vocab.token_eot += 1;
-            vocab.token_sot += 1;
-            vocab.token_prev += 1;
-            vocab.token_solm += 1;
-            vocab.token_not += 1;
-            vocab.token_beg += 1;
-        }
-
-        if n_vocab < hparams.n_vocab {
-            println!(
-                "{}: adding {} extra tokens",
-                function!(),
-                hparams.n_vocab - n_vocab
-            );
-            for i in n_vocab..hparams.n_vocab {
-                let word = if i > vocab.token_beg {
-                    format!("[_TT_{}]", i - vocab.token_beg)
-                } else if i == vocab.token_eot {
-                    "[_EOT_]".to_string()
-                } else if i == vocab.token_sot {
-                    "[_SOT_]".to_string()
-                } else if i == vocab.token_prev {
-                    "[_PREV_]".to_string()
-                } else if i == vocab.token_not {
-                    "[_NOT_]".to_string()
-                } else if i == vocab.token_beg {
-                    "[_BEG_]".to_string()
-                } else {
-                    format!("[_extra_token_{}]", i)
-                };
-                vocab.token_to_id.insert(word.clone(), i);
-                vocab.id_to_token.insert(i, word);
-            }
-        }
-
         let wtype = if hparams.f16 == 1 {
             DType::F16
         } else {
@@ -1347,6 +1401,28 @@ impl WhisperModel {
                 })
             }
 
+            //load kv memmory
+            let mut tensor_ctx: TensorContext = TensorContext::default();
+
+            let n_text_ctx = hparams.n_text_ctx as usize;
+            let n_text_state = hparams.n_text_state as usize;
+            let n_text_layer = hparams.n_text_layer as usize;
+
+            let n_mem = n_text_layer * n_text_ctx;
+            let n_elements = n_text_state * n_mem;
+
+            let memory_k = new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
+            let memory_v = new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
+
+            let n_audio_ctx = hparams.n_audio_ctx as usize;
+
+            let n_mem = n_text_layer * n_audio_ctx;
+            let n_elements = n_text_state * n_mem;
+            let memory_cross_k =
+                new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
+            let memory_cross_v =
+                new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
+
             WhisperModel {
                 mtype: mtype,
                 hparams: hparams,
@@ -1364,14 +1440,16 @@ impl WhisperModel {
                 d_ln_b,
                 layers_encoder,
                 layers_decoder,
+                memory_k,
+                memory_v,
+                memory_cross_k,
+                memory_cross_v,
                 n_loaded: 1,
             }
         };
         // load weights
         {
             let mut total_size: usize = 0;
-
-            //model.n_loaded = 0;
             let j: usize = 0;
             loop {
                 let n_dims = r.read_i32::<Endian>()?;
@@ -1424,7 +1502,7 @@ impl WhisperModel {
                         ));
                     }
                     r.read_exact(tensor.as_bytes_mut())?;
-                    println!("name:{}", name);
+                    //  println!("name:{}", name);
                     total_size += tensor.nbytes();
                     whisper_mode.n_loaded += 1;
                     match r.fill_buf() {
@@ -1451,7 +1529,7 @@ impl WhisperModel {
                 total_size as f32 / 1024.0 / 1024.0
             );
         }
-        todo!()
+        Ok(whisper_mode)
     }
 }
 
@@ -1495,7 +1573,7 @@ fn fft(inp: &[f32], out: &mut Vec<f32>) {
         if i % 2 == 0 {
             even.push(inp[i]);
         } else {
-            odd.push(out[i]);
+            odd.push(inp[i]);
         }
     }
 
@@ -1539,76 +1617,87 @@ fn log_mel_spectrogram(
     let _hann: Vec<f32> = (0..fft_size)
         .map(|i| 0.5 * (1.0 - ((2.0 * std::f32::consts::PI * i as f32) / fft_size_f32).cos()))
         .collect();
+
+    let y: f32 = _hann.iter().sum();
+    println!("_hann:{:?}", y);
     let mhann = Arc::new(_hann);
     mel.n_mel = n_mel;
-    mel.n_len = n_samples / fft_step;
-    mel.data.borrow_mut().resize(mel.n_mel * mel.n_len, 0.0f32);
-    let n_fft = 1 + (if speed_up { fft_size / 4 } else { fft_size / 2 });
-    let mut works: Vec<JoinHandle<()>> = Vec::with_capacity(n_threads);
-    for iw in 0..n_threads {
-        let mel_data = mel.data.clone();
-        let m_samples = samples.clone();
-        let filter_data = filters.data.clone();
-        let hann = mhann.clone();
-        let work = std::thread::spawn(move || {
-            let data: &mut Vec<f32> = mel_data.borrow_mut();
-            let filter_data = filter_data.borrow();
-            let ith = iw;
-            let mut fft_in = vec![0.0f32; fft_size];
-            let mut fft_out = vec![0.0f32; 2 * fft_size];
-            for i in (ith..n_mel).step_by(n_threads) {
-                let offset = i * fft_step;
-                for j in 0..fft_size {
-                    if (offset + j < n_samples) {
-                        fft_in[j] = hann[j] * m_samples[offset + j];
-                    } else {
-                        fft_in[j] = 0.0;
+    let n_len = n_samples / fft_step;
+    mel.n_len = n_len;
+    unsafe {
+        mel.data.borrow_mut().resize(mel.n_mel * mel.n_len, 0.0f32);
+        println!("mel.data.len:{}", mel.data.borrow().len());
+        let n_fft = 1 + (if speed_up { fft_size / 4 } else { fft_size / 2 });
+        let mut works: Vec<JoinHandle<()>> = Vec::with_capacity(n_threads);
+        for iw in 0..n_threads {
+            let mel_data = mel.data.clone();
+            let m_samples = samples.clone();
+            let filter_data = filters.data.clone();
+            let hann = mhann.clone();
+            let work = std::thread::spawn(move || {
+                let data: &mut Vec<f32> = mel_data.borrow_mut();
+                let filter_data = filter_data.borrow();
+                let ith = iw;
+                let mut fft_in = vec![0.0f32; fft_size];
+                let mut fft_out = vec![0.0f32; 2 * fft_size];
+                for i in (ith..n_len).step_by(n_threads) {
+                    let offset = i * fft_step;
+                    for j in 0..fft_size {
+                        if (offset + j < n_samples) {
+                            fft_in[j] = hann[j] * m_samples[offset + j];
+                        } else {
+                            fft_in[j] = 0.0;
+                        }
+                    }
+                    fft(&fft_in, &mut fft_out);
+                    for j in 0..fft_size {
+                        fft_out[j] = fft_out[2 * j] * fft_out[2 * j]
+                            + fft_out[2 * j + 1] * fft_out[2 * j + 1];
+                    }
+
+                    for j in 1..fft_size / 2 {
+                        fft_out[j] += fft_out[fft_size - j];
+                    }
+
+                    if speed_up {
+                        // Scale down in the frequency domain results in a speed up in the time domain
+                        for j in 0..n_fft {
+                            fft_out[j] = 0.5 * (fft_out[2 * j] + fft_out[2 * j + 1]);
+                        }
+                    }
+
+                    // Mel spectrogram
+                    for j in 0..n_mel {
+                        let mut sum = 0.0;
+
+                        for k in 0..n_fft {
+                            sum += fft_out[k] * filter_data[j * n_fft + k];
+                        }
+
+                        if sum < 1e-10 {
+                            sum = 1e-10;
+                        }
+
+                        sum = sum.log10();
+
+                        data[j * n_len + i] = sum;
                     }
                 }
 
-                for j in 0..fft_size {
-                    fft_out[j] =
-                        fft_out[2 * j] * fft_out[2 * j] + fft_out[2 * j + 1] * fft_out[2 * j + 1];
-                }
+                println!("{}", iw);
+            });
+            works.push(work);
+        }
 
-                for j in 1..fft_size / 2 {
-                    fft_out[j] += fft_out[fft_size - j];
-                }
-
-                if speed_up {
-                    // Scale down in the frequency domain results in a speed up in the time domain
-                    for j in 0..n_fft {
-                        fft_out[j] = 0.5 * (fft_out[2 * j] + fft_out[2 * j + 1]);
-                    }
-                }
-
-                // Mel spectrogram
-                for j in 0..n_mel {
-                    let mut sum = 0.0;
-
-                    for k in 0..n_fft {
-                        sum += fft_out[k] * filter_data[j * n_fft + k];
-                    }
-
-                    if sum < 1e-10 {
-                        sum = 1e-10;
-                    }
-
-                    sum = sum.log10();
-
-                    data[j * n_mel + i] = sum;
-                }
-            }
-
-            println!("{}", iw);
-        });
-        works.push(work);
+        for v in works {
+            v.join().unwrap();
+        }
+        let data = mel.data.borrow();
+        let x: f32 = data.iter().sum();
+        println!("x1:{:?}", x);
+        clamp_and_normalize(mel.data.borrow_mut());
     }
-    for v in works {
-        v.join().unwrap();
-    }
 
-    clamp_and_normalize(mel.data.borrow_mut());
     Ok(())
 }
 
@@ -1639,12 +1728,45 @@ fn convert_integer_to_float_audio(samples: &[i16]) -> Vec<f32> {
     floats
 }
 
+fn whisper_pcm_to_mel(ctx: &mut WhisperContext, samples: Arc<Vec<f32>>) -> WsResult<()> {
+    let mut x: f32 = 0.0;
+    for i in 0..samples.len() {
+        x += samples[i];
+    }
+    println!("y:{}", x);
+
+    let data = unsafe { &ctx.model.filters.data.borrow() };
+    let x: f32 = data.iter().sum();
+    println!("filters:{:?}", x);
+
+    log_mel_spectrogram(
+        samples,
+        WHISPER_SAMPLE_RATE,
+        WHISPER_N_FFT,
+        WHISPER_HOP_LENGTH,
+        WHISPER_N_MEL,
+        4,
+        &ctx.model.filters,
+        false,
+        &mut ctx.mel,
+    )?;
+    let data = unsafe { ctx.mel.data.borrow() };
+    let x: f32 = data.iter().sum();
+    println!("x:{:?}", x);
+    Ok(())
+}
+
+fn whisper_full(ctx: &mut WhisperContext, samples: Vec<f32>) {}
+
 fn main() {
-    let file_path = "/opt/rsproject/chappie/jfk.wav";
+    let file_path = "/opt/cproject/whisper.cpp-1.0.3/samples/jfk.wav";
     let mut reader = hound::WavReader::open(file_path).unwrap();
     let s16: Vec<i16> = reader.samples::<i16>().map(Result::unwrap).collect();
     println!("len:{}", s16.len());
     let samples = convert_integer_to_float_audio(&s16); //deinterleave_vecs_f32(&data.data(), data.channel_count() as usize);
+    let model_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
+    let mut wctx = WhisperContext::new(model_path).unwrap();
+    whisper_pcm_to_mel(&mut wctx, Arc::new(samples)).unwrap();
 }
 
 #[cfg(test)]
@@ -1653,14 +1775,14 @@ mod tests {
 
     #[test]
     fn test_load_model() {
-        println!("xxe");
-        let file_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
-        let mut wctx = WhisperContext::new(file_path).unwrap();
-        //  let m = WhisperModel::load(file_path, &mut wctx);
-        // match WhisperModel::load(file_path) {
-        //     Ok(_) => {}
-        //     Err(e) => println!("{}", e),
-        // }
+        let file_path = "/opt/rsproject/chappie/jfk.wav";
+        let mut reader = hound::WavReader::open(file_path).unwrap();
+        let s16: Vec<i16> = reader.samples::<i16>().map(Result::unwrap).collect();
+        println!("len:{}", s16.len());
+        let samples = convert_integer_to_float_audio(&s16); //deinterleave_vecs_f32(&data.data(), data.channel_count() as usize);
+        let model_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
+        let mut wctx = WhisperContext::new(model_path).unwrap();
+        whisper_pcm_to_mel(&mut wctx, Arc::new(samples)).unwrap();
     }
 
     #[derive(Debug)]
