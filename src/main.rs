@@ -1438,8 +1438,6 @@ impl WhisperModel {
                             _ => return Err(WsError::UnexpectIO(e)),
                         },
                     }
-
-                    // println!("Referenced struct: {:?}", tensor.dim());
                 } else {
                     println!("break");
                     return Err(WsError::BadRefTensor(name));
