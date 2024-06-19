@@ -1756,10 +1756,22 @@ fn whisper_pcm_to_mel(ctx: &mut WhisperContext, samples: Arc<Vec<f32>>) -> WsRes
     Ok(())
 }
 
-fn whisper_encode(ctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) {
-    let model = &ctx.model;
-    let mel_inp = &ctx.mel;
+fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) {
+    let model = &wctx.model;
+    let mel_inp = &wctx.mel;
     let hparams = &model.hparams;
+    let n_ctx = if wctx.exp_n_audio_ctx > 0 {
+        wctx.exp_n_audio_ctx
+    } else {
+        hparams.n_audio_ctx
+    };
+    let n_state = hparams.n_audio_state;
+    let n_head = hparams.n_audio_head;
+    let n_layer = hparams.n_audio_layer;
+    let n_mels = hparams.n_mels;
+    assert!(mel_inp.n_mel == n_mels as usize);
+    let buf_compute = &wctx.buf_compute;
+    let mel = new_tensor_2d(ctx0, GGML_TYPE_F32, 2 * n_ctx, n_mels);
 }
 
 fn main() {
