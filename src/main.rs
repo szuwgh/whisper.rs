@@ -1750,13 +1750,17 @@ fn whisper_pcm_to_mel(ctx: &mut WhisperContext, samples: Arc<Vec<f32>>) -> WsRes
         false,
         &mut ctx.mel,
     )?;
-    let data = unsafe { ctx.mel.data.borrow() };
-    let x: f32 = data.iter().sum();
-    println!("x:{:?}", x);
+    // let data = unsafe { ctx.mel.data.borrow() };
+    // let x: f32 = data.iter().sum();
+    // println!("x:{:?}", x);
     Ok(())
 }
 
-fn whisper_full(ctx: &mut WhisperContext, samples: Vec<f32>) {}
+fn whisper_encode(ctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) {
+    let model = &ctx.model;
+    let mel_inp = &ctx.mel;
+    let hparams = &model.hparams;
+}
 
 fn main() {
     let file_path = "/opt/cproject/whisper.cpp-1.0.3/samples/jfk.wav";
