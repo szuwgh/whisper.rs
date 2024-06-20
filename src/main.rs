@@ -1754,22 +1754,41 @@ fn whisper_pcm_to_mel(ctx: &mut WhisperContext, samples: Arc<Vec<f32>>) -> WsRes
     Ok(())
 }
 
-fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) {
+fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) -> WsResult<()> {
     let model = &wctx.model;
     let mel_inp = &wctx.mel;
     let hparams = &model.hparams;
     let n_ctx = if wctx.exp_n_audio_ctx > 0 {
-        wctx.exp_n_audio_ctx
+        wctx.exp_n_audio_ctx as usize
     } else {
-        hparams.n_audio_ctx
+        hparams.n_audio_ctx as usize
     };
-    let n_state = hparams.n_audio_state;
-    let n_head = hparams.n_audio_head;
-    let n_layer = hparams.n_audio_layer;
-    let n_mels = hparams.n_mels;
+    let n_state = hparams.n_audio_state as usize;
+    let n_head = hparams.n_audio_head as usize;
+    let n_layer = hparams.n_audio_layer as usize;
+    let n_mels = hparams.n_mels as usize;
     assert!(mel_inp.n_mel == n_mels as usize);
     let buf_compute = &wctx.buf_compute;
-    let mel = new_tensor_2d(ctx0, GGML_TYPE_F32, 2 * n_ctx, n_mels);
+    let mut ctx0: TensorContext = TensorContext::default();
+    let mel = new_tensor_2d(&mut ctx0, &buf_compute, DType::F32, 2 * n_ctx, n_mels)?;
+    assert!(mel.dtype() == DType::F32);
+    {
+        let dst = unsafe { mel.as_slice_mut::<f32>() };
+        dst.fill(0.0);
+
+        let i0 = std::cmp::min(mel_offset, mel_inp.n_len);
+        let i1: usize = std::cmp::min(mel_offset + 2 * n_ctx, mel_inp.n_len);
+        let data = unsafe { mel_inp.data.borrow() };
+        for j in 0..mel_inp.n_mel {
+            for i in i0..i1 {
+                dst[j * 2 * n_ctx + (i - i0)] = data[j * mel_inp.n_len + i];
+            }
+        }
+
+        let y: f32 = dst.iter().sum();
+        println!("y:{:?}", y);
+    }
+    Ok(())
 }
 
 fn main() {
@@ -1781,6 +1800,7 @@ fn main() {
     let model_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
     let mut wctx = WhisperContext::new(model_path).unwrap();
     whisper_pcm_to_mel(&mut wctx, Arc::new(samples)).unwrap();
+    whisper_encode(&mut wctx, 4, 0).unwrap();
 }
 
 #[cfg(test)]
