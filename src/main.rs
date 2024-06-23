@@ -204,7 +204,7 @@ fn new_tensor_1d(
     ne0: usize,
 ) -> WsResult<GsTensor> {
     let dim = [ne0];
-    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
+    new_tensor(ctx, buf, 1, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor_2d(
@@ -215,7 +215,7 @@ fn new_tensor_2d(
     ne1: usize,
 ) -> WsResult<GsTensor> {
     let dim = [ne0, ne1];
-    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
+    new_tensor(ctx, buf, 1, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor_3d(
@@ -227,7 +227,7 @@ fn new_tensor_3d(
     ne2: usize,
 ) -> WsResult<GsTensor> {
     let dim = [ne0, ne1, ne2];
-    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
+    new_tensor(ctx, buf, 3, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor_4d(
@@ -240,12 +240,13 @@ fn new_tensor_4d(
     ne4: usize,
 ) -> WsResult<GsTensor> {
     let dim = [ne0, ne1];
-    new_tensor(ctx, buf, dtype, Shape::from_array(dim))
+    new_tensor(ctx, buf, 2, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor(
     ctx: &mut TensorContext,
     buf: &[u8],
+    n_dims: usize,
     dtype: DType,
     shape: Shape,
 ) -> WsResult<GsTensor> {
@@ -255,7 +256,14 @@ fn new_tensor(
     if cur_offset + size_needed > buf.len() {
         return Err(WsError::NotEnoughSpace);
     }
-    let t = GsTensor::from_bytes(&buf[cur_offset..cur_offset + size_needed], shape, dtype);
+    let t = unsafe {
+        GsTensor::from_bytes(
+            &buf[cur_offset..cur_offset + size_needed],
+            n_dims,
+            shape,
+            dtype,
+        )
+    };
     ctx.offset = cur_offset + size_needed;
     ctx.size = size_needed;
     ctx.n_objects += 1;
@@ -1479,7 +1487,7 @@ impl WhisperModel {
                             nelements,
                         ));
                     }
-                    let shape = tensor.dim().shape().as_slice();
+                    let shape = tensor.dim().shape();
                     for i in 0..shape.len() {
                         if shape[i] != ne[i] {
                             return Err(WsError::WrongShapeTensor(
@@ -1788,6 +1796,19 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         let y: f32 = dst.iter().sum();
         println!("y:{:?}", y);
     }
+    let ne = [mel.shape()[0], model.e_conv_1_w.shape()[2]];
+    println!("ne:{:?}", ne);
+    let mut dst = new_tensor(
+        &mut ctx0,
+        &buf_compute,
+        2,
+        DType::F32,
+        Shape::from_array(ne),
+    )?;
+    galois::op::conv_1d_1s(&mel, &model.e_conv_1_w, &mut dst, 1, 1, 1, 1).unwrap();
+    let dst = unsafe { dst.as_slice_mut::<f32>() };
+    let conv_1d_1s: f32 = dst.iter().sum();
+    println!("conv_1d_1s:{:?}", conv_1d_1s);
     Ok(())
 }
 
