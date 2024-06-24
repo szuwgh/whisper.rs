@@ -3,6 +3,7 @@ use byteorder::ReadBytesExt;
 use core::cell::UnsafeCell;
 use galois::Shape;
 use galois::Tensor as GsTensor;
+use galois::F16;
 use galois::{DType, GS_TYPE_SIZE};
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -1805,6 +1806,10 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         DType::F32,
         Shape::from_array(ne),
     )?;
+    let kernel = unsafe { model.e_conv_1_w.as_slice_mut::<F16>() };
+    let kernel_num: F16 = kernel.iter().sum();
+    println!("kernel_num:{:?}", kernel_num);
+
     galois::op::conv_1d_1s(&mel, &model.e_conv_1_w, &mut dst, 1, 1, 1, 1).unwrap();
     let dst = unsafe { dst.as_slice_mut::<f32>() };
     let conv_1d_1s: f32 = dst.iter().sum();
