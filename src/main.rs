@@ -2,6 +2,7 @@ use byteorder::LittleEndian;
 use byteorder::ReadBytesExt;
 use core::cell::UnsafeCell;
 use galois::error::GError;
+
 use galois::Shape;
 use galois::Tensor as GsTensor;
 use galois::F16;
@@ -278,6 +279,12 @@ fn new_tensor(
     ctx.size = size_needed;
     ctx.n_objects += 1;
     Ok(t)
+}
+
+fn dup_tensor(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor) -> WsResult<GsTensor> {
+    let dtype = a.dtype();
+    let shape = Shape::from_slice(a.dim().shape());
+    new_tensor(ctx, buf, a.n_dims(), dtype, shape)
 }
 
 #[derive(Default)]
@@ -1780,7 +1787,7 @@ fn conv_1d_1s(
 ) -> WsResult<GsTensor> {
     let ne = [src.shape()[0], kernel.shape()[2]];
     let mut dst = new_tensor(ctx, buf, 2, DType::F32, Shape::from_array(ne))?;
-    galois::op::conv_1d_1s(src, kernel, &mut dst)?;
+    galois::op::galois_conv_1d_1s(src, kernel, &mut dst)?;
     Ok(dst)
 }
 
@@ -1797,7 +1804,13 @@ fn repeat(
         src.dtype(),
         Shape::from_slice(cur.shape()),
     )?;
-    galois::op::repeat(src, &mut dst)?;
+    galois::op::galois_repeat(src, &mut dst)?;
+    Ok(dst)
+}
+
+fn add(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor, b: &GsTensor) -> WsResult<GsTensor> {
+    let mut dst = dup_tensor(ctx, buf, a)?;
+    galois::op::galois_add(a, b, &mut dst)?;
     Ok(dst)
 }
 
@@ -1836,12 +1849,11 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         println!("y:{:?}", y);
     }
     let mut cur = conv_1d_1s(&mut ctx0, &buf_compute, &mel, &model.e_conv_1_w)?;
-    cur = repeat(&mut ctx0, &buf_compute, &model.e_conv_1_b, &cur)?;
-    
-
+    let tmp = repeat(&mut ctx0, &buf_compute, &model.e_conv_1_b, &cur)?;
+    cur = add(&mut ctx0, &buf_compute, &tmp, &cur)?;
     let x: &mut [f32] = unsafe { cur.as_slice_mut::<f32>() };
-    let repeat: f32 = x.iter().sum();
-    println!("repeat:{:?}", repeat);
+    let add: f32 = x.iter().sum();
+    println!("add:{:?}", add);
 
     Ok(())
 }
