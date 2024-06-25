@@ -1,6 +1,7 @@
 use byteorder::LittleEndian;
 use byteorder::ReadBytesExt;
 use core::cell::UnsafeCell;
+use galois::error::GError;
 use galois::Shape;
 use galois::Tensor as GsTensor;
 use galois::F16;
@@ -69,7 +70,7 @@ type Endian = LittleEndian;
 pub enum WsError {
     #[error("Unexpected: {0}")]
     Unexpected(String),
-    #[error("Unexpected io: {0}")]
+    #[error("Unexpected IO: {0}")]
     UnexpectIO(io::Error),
     #[error("invalid model file '{0}' (bad magic)\n")]
     BadMagic(String),
@@ -85,6 +86,8 @@ pub enum WsError {
     WrongShapeTensor(String, Vec<usize>, Vec<usize>),
     #[error("tensor {0} has wrong bytes in model file, got:{1:?}, expected:{2:?}\n")]
     WrongBytesTensor(String, usize, usize),
+    #[error("galois tensor:'{0}'")]
+    WrongGTensor(GError),
 }
 
 impl From<IOError> for WsError {
@@ -96,6 +99,12 @@ impl From<IOError> for WsError {
 impl From<&str> for WsError {
     fn from(e: &str) -> Self {
         WsError::Unexpected(e.to_string())
+    }
+}
+
+impl From<GError> for WsError {
+    fn from(e: GError) -> Self {
+        WsError::WrongGTensor(e)
     }
 }
 
@@ -1763,6 +1772,35 @@ fn whisper_pcm_to_mel(ctx: &mut WhisperContext, samples: Arc<Vec<f32>>) -> WsRes
     Ok(())
 }
 
+fn conv_1d_1s(
+    ctx: &mut TensorContext,
+    buf: &[u8],
+    src: &GsTensor,
+    kernel: &GsTensor,
+) -> WsResult<GsTensor> {
+    let ne = [src.shape()[0], kernel.shape()[2]];
+    let mut dst = new_tensor(ctx, buf, 2, DType::F32, Shape::from_array(ne))?;
+    galois::op::conv_1d_1s(src, kernel, &mut dst)?;
+    Ok(dst)
+}
+
+fn repeat(
+    ctx: &mut TensorContext,
+    buf: &[u8],
+    src: &GsTensor,
+    cur: &GsTensor,
+) -> WsResult<GsTensor> {
+    let mut dst = new_tensor(
+        ctx,
+        buf,
+        cur.n_dims(),
+        src.dtype(),
+        Shape::from_slice(cur.shape()),
+    )?;
+    galois::op::repeat(src, &mut dst)?;
+    Ok(dst)
+}
+
 fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) -> WsResult<()> {
     let model = &wctx.model;
     let mel_inp = &wctx.mel;
@@ -1797,23 +1835,14 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         let y: f32 = dst.iter().sum();
         println!("y:{:?}", y);
     }
-    let ne = [mel.shape()[0], model.e_conv_1_w.shape()[2]];
-    println!("ne:{:?}", ne);
-    let mut dst = new_tensor(
-        &mut ctx0,
-        &buf_compute,
-        2,
-        DType::F32,
-        Shape::from_array(ne),
-    )?;
-    let kernel = unsafe { model.e_conv_1_w.as_slice_mut::<F16>() };
-    let kernel_num: F16 = kernel.iter().sum();
-    println!("kernel_num:{:?}", kernel_num);
+    let mut cur = conv_1d_1s(&mut ctx0, &buf_compute, &mel, &model.e_conv_1_w)?;
+    cur = repeat(&mut ctx0, &buf_compute, &model.e_conv_1_b, &cur)?;
+    
 
-    galois::op::conv_1d_1s(&mel, &model.e_conv_1_w, &mut dst, 1, 1, 1, 1).unwrap();
-    let dst = unsafe { dst.as_slice_mut::<f32>() };
-    let conv_1d_1s: f32 = dst.iter().sum();
-    println!("conv_1d_1s:{:?}", conv_1d_1s);
+    let x: &mut [f32] = unsafe { cur.as_slice_mut::<f32>() };
+    let repeat: f32 = x.iter().sum();
+    println!("repeat:{:?}", repeat);
+
     Ok(())
 }
 

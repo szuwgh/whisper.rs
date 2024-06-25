@@ -10,4 +10,5 @@ hound = "3.5.1"
 byteorder = "1.5.0"
 thiserror = "1.0.60"
 lazy_static = "1.2.0"
-galois = { path = "../galois", version = "0.1.0" }
+galois = {path = "../galois", version = "0.1.0", target_feature="avx"}
+
