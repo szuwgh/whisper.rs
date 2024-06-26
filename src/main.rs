@@ -282,8 +282,7 @@ fn new_tensor(
 }
 
 fn view_tensor(a: &GsTensor, n_dims: usize, dtype: DType, shape: Shape) -> WsResult<GsTensor> {
-    let t = unsafe { GsTensor::from_bytes(a.as_bytes(), n_dims, shape, dtype) };
-    Ok(t)
+    Ok(unsafe { GsTensor::from_bytes(a.as_bytes(), n_dims, shape, dtype) })
 }
 
 fn dup_tensor(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor) -> WsResult<GsTensor> {
@@ -295,7 +294,7 @@ fn dup_tensor(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor) -> WsResult<GsT
 fn view_2d(a: &GsTensor, ne0: usize, ne1: usize, nb1: usize, offset: usize) -> WsResult<GsTensor> {
     let dtype = a.dtype();
     let shape = Shape::from_slice(a.dim().shape());
-    new_tensor(ctx, buf, a.n_dims(), dtype, shape)
+    view_tensor(a, a.n_dims(), dtype, shape)
 }
 
 #[derive(Default)]
@@ -1887,10 +1886,10 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     cur = add(&mut ctx0, &buf_compute, &tmp, &cur)?;
     cur = gelu(&mut ctx0, &buf_compute, &cur)?;
 
-    let iter = 0;
+    // let iter = 0;
 
-    let e_pe_stride = model.e_pe.dim1();
-    let e_pe_offset = model.e_pe.dim1() * n_ctx * iter;
+    // let e_pe_stride = model.e_pe.dim1();
+    // let e_pe_offset = model.e_pe.dim1() * n_ctx * iter;
 
     // let e_pe = ggml_view_2d(ctx0, model.e_pe, model.e_pe->ne[0], n_ctx, e_pe_stride, e_pe_offset);
 
