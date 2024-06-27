@@ -281,8 +281,8 @@ fn new_tensor(
     Ok(t)
 }
 
-fn view_tensor(a: &GsTensor, n_dims: usize, dtype: DType, shape: Shape) -> WsResult<GsTensor> {
-    Ok(unsafe { GsTensor::from_bytes(a.as_bytes(), n_dims, shape, dtype) })
+fn view_tensor(buf: &[u8], n_dims: usize, dtype: DType, shape: Shape) -> WsResult<GsTensor> {
+    Ok(unsafe { GsTensor::from_bytes(buf, n_dims, shape, dtype) })
 }
 
 fn dup_tensor(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor) -> WsResult<GsTensor> {
@@ -293,8 +293,13 @@ fn dup_tensor(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor) -> WsResult<GsT
 
 fn view_2d(a: &GsTensor, ne0: usize, ne1: usize, nb1: usize, offset: usize) -> WsResult<GsTensor> {
     let dtype = a.dtype();
-    let shape = Shape::from_slice(a.dim().shape());
-    view_tensor(a, a.n_dims(), dtype, shape)
+    let buf = a.as_bytes();
+    let shape = Shape::from_array([ne0, ne1]);
+    let mut t = view_tensor(&buf[offset..], 2, dtype, shape)?;
+    let nb0 = t.dim().stride_1d();
+    let nb = [nb0, nb1, nb1 * ne1, nb1 * ne1];
+    t.ret_stride(nb);
+    Ok(t)
 }
 
 #[derive(Default)]
@@ -1886,14 +1891,20 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     cur = add(&mut ctx0, &buf_compute, &tmp, &cur)?;
     cur = gelu(&mut ctx0, &buf_compute, &cur)?;
 
-    // let iter = 0;
+    let iter = 0;
 
-    // let e_pe_stride = model.e_pe.dim1();
-    // let e_pe_offset = model.e_pe.dim1() * n_ctx * iter;
+    let e_pe_stride = model.e_pe.dim1();
+    let e_pe_offset = model.e_pe.dim1() * model.e_pe.dtype_size() * n_ctx * iter;
 
-    // let e_pe = ggml_view_2d(ctx0, model.e_pe, model.e_pe->ne[0], n_ctx, e_pe_stride, e_pe_offset);
+    let e_pe = view_2d(
+        &model.e_pe,
+        model.e_pe.dim1(),
+        n_ctx,
+        e_pe_stride,
+        e_pe_offset,
+    )?;
 
-    // cur = ggml_add(ctx0, e_pe, ggml_transpose(ctx0, cur));
+    cur = add(&mut ctx0, &buf_compute, &e_pe, &cur.transpose(0, 1)?)?;
 
     let x: &mut [f32] = unsafe { cur.as_slice_mut::<f32>() };
     let sum: f32 = x.iter().sum();
