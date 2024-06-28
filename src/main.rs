@@ -208,42 +208,34 @@ lazy_static! {
     };
 }
 
-fn new_tensor_1d(
-    ctx: &mut TensorContext,
-    buf: &[u8],
-    dtype: DType,
-    ne0: usize,
-) -> WsResult<GsTensor> {
+fn new_tensor_1d(ctx: &mut TensorContext, dtype: DType, ne0: usize) -> WsResult<GsTensor> {
     let dim = [ne0];
-    new_tensor(ctx, buf, 1, dtype, Shape::from_array(dim))
+    new_tensor(ctx, 1, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor_2d(
     ctx: &mut TensorContext,
-    buf: &[u8],
     dtype: DType,
     ne0: usize,
     ne1: usize,
 ) -> WsResult<GsTensor> {
     let dim = [ne0, ne1];
-    new_tensor(ctx, buf, 1, dtype, Shape::from_array(dim))
+    new_tensor(ctx, 2, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor_3d(
     ctx: &mut TensorContext,
-    buf: &[u8],
     dtype: DType,
     ne0: usize,
     ne1: usize,
     ne2: usize,
 ) -> WsResult<GsTensor> {
     let dim = [ne0, ne1, ne2];
-    new_tensor(ctx, buf, 3, dtype, Shape::from_array(dim))
+    new_tensor(ctx, 3, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor_4d(
     ctx: &mut TensorContext,
-    buf: &[u8],
     dtype: DType,
     ne0: usize,
     ne1: usize,
@@ -251,12 +243,11 @@ fn new_tensor_4d(
     ne4: usize,
 ) -> WsResult<GsTensor> {
     let dim = [ne0, ne1];
-    new_tensor(ctx, buf, 2, dtype, Shape::from_array(dim))
+    new_tensor(ctx, 2, dtype, Shape::from_array(dim))
 }
 
 fn new_tensor(
     ctx: &mut TensorContext,
-    buf: &[u8],
     n_dims: usize,
     dtype: DType,
     shape: Shape,
@@ -264,12 +255,12 @@ fn new_tensor(
     let cur_offset = ctx.offset;
     let cur_size = ctx.size;
     let size_needed: usize = get_type_size(dtype) * shape.size();
-    if cur_offset + size_needed > buf.len() {
+    if cur_offset + size_needed > ctx.buf.len() {
         return Err(WsError::NotEnoughSpace);
     }
     let t = unsafe {
         GsTensor::from_bytes(
-            &buf[cur_offset..cur_offset + size_needed],
+            &ctx.buf[cur_offset..cur_offset + size_needed],
             n_dims,
             shape,
             dtype,
@@ -285,10 +276,10 @@ fn view_tensor(buf: &[u8], n_dims: usize, dtype: DType, shape: Shape) -> WsResul
     Ok(unsafe { GsTensor::from_bytes(buf, n_dims, shape, dtype) })
 }
 
-fn dup_tensor(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor) -> WsResult<GsTensor> {
+fn dup_tensor(ctx: &mut TensorContext, a: &GsTensor) -> WsResult<GsTensor> {
     let dtype = a.dtype();
     let shape = Shape::from_slice(a.dim().shape());
-    new_tensor(ctx, buf, a.n_dims(), dtype, shape)
+    new_tensor(ctx, a.n_dims(), dtype, shape)
 }
 
 fn view_2d(a: &GsTensor, ne0: usize, ne1: usize, nb1: usize, offset: usize) -> WsResult<GsTensor> {
@@ -302,11 +293,22 @@ fn view_2d(a: &GsTensor, ne0: usize, ne1: usize, nb1: usize, offset: usize) -> W
     Ok(t)
 }
 
-#[derive(Default)]
-struct TensorContext {
+struct TensorContext<'a> {
     offset: usize,
     size: usize,
     n_objects: usize,
+    buf: &'a [u8],
+}
+
+impl<'a> TensorContext<'a> {
+    fn new(buf: &'a [u8]) -> TensorContext<'a> {
+        TensorContext {
+            offset: 0,
+            size: 0,
+            n_objects: 0,
+            buf: buf,
+        }
+    }
 }
 
 type WhisperToken = i32;
@@ -942,7 +944,7 @@ impl WhisperModel {
         let mut tensors: HashMap<String, *const GsTensor> = HashMap::new();
 
         let mut whisper_mode = {
-            let mut tensor_ctx = TensorContext::default();
+            let mut tensor_ctx = TensorContext::new(buf_model);
             let n_vocab = hparams.n_vocab as usize;
             let n_audio_ctx = hparams.n_audio_ctx as usize;
             let n_audio_state = hparams.n_audio_state as usize;
@@ -954,31 +956,16 @@ impl WhisperModel {
             let n_mels = hparams.n_mels as usize;
 
             // encoder
-            let e_pe = new_tensor_2d(
-                &mut tensor_ctx,
-                buf_model,
-                DType::F32,
-                n_audio_state,
-                n_audio_ctx,
-            )?;
-            let e_conv_1_w =
-                new_tensor_3d(&mut tensor_ctx, buf_model, wtype, 3, n_mels, n_audio_state)?;
-            let e_conv_1_b =
-                new_tensor_2d(&mut tensor_ctx, buf_model, DType::F32, 1, n_audio_state)?;
+            let e_pe = new_tensor_2d(&mut tensor_ctx, DType::F32, n_audio_state, n_audio_ctx)?;
+            let e_conv_1_w = new_tensor_3d(&mut tensor_ctx, wtype, 3, n_mels, n_audio_state)?;
+            let e_conv_1_b = new_tensor_2d(&mut tensor_ctx, DType::F32, 1, n_audio_state)?;
 
-            let e_conv_2_w = new_tensor_3d(
-                &mut tensor_ctx,
-                buf_model,
-                wtype,
-                3,
-                n_audio_state,
-                n_audio_state,
-            )?;
-            let e_conv_2_b =
-                new_tensor_2d(&mut tensor_ctx, buf_model, DType::F32, 1, n_audio_state)?;
+            let e_conv_2_w =
+                new_tensor_3d(&mut tensor_ctx, wtype, 3, n_audio_state, n_audio_state)?;
+            let e_conv_2_b = new_tensor_2d(&mut tensor_ctx, DType::F32, 1, n_audio_state)?;
 
-            let e_ln_w = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
-            let e_ln_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+            let e_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+            let e_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
 
             // let weights = Box::new([
             //     e_pe, e_conv_1_w, e_conv_1_b, e_conv_2_w, e_conv_2_b, e_ln_w, e_ln_b, d_pe, d_te,
@@ -1016,68 +1003,27 @@ impl WhisperModel {
             let mut layers_encoder: Vec<WhisperLayerEncoder> = Vec::with_capacity(n_audio_layer);
             let mut layers_decoder: Vec<WhisperLayerDecoder> = Vec::with_capacity(n_text_layer);
             for i in 0..n_audio_layer {
-                let mlp_ln_w =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
-                let mlp_ln_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
-                let mlp_0_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_audio_state,
-                    4 * n_audio_state,
-                )?;
-                let mlp_0_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, 4 * n_audio_state)?;
-                let mlp_1_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    4 * n_audio_state,
-                    n_audio_state,
-                )?;
-                let mlp_1_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
-                let attn_ln_0_w =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
-                let attn_ln_0_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
-                let attn_q_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_audio_state,
-                    n_audio_state,
-                )?;
-                let attn_q_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let mlp_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+                let mlp_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+                let mlp_0_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_audio_state, 4 * n_audio_state)?;
+                let mlp_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, 4 * n_audio_state)?;
+                let mlp_1_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, 4 * n_audio_state, n_audio_state)?;
+                let mlp_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+                let attn_ln_0_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+                let attn_ln_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+                let attn_q_w = new_tensor_2d(&mut tensor_ctx, wtype, n_audio_state, n_audio_state)?;
+                let attn_q_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
 
-                let attn_k_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_audio_state,
-                    n_audio_state,
-                )?;
+                let attn_k_w = new_tensor_2d(&mut tensor_ctx, wtype, n_audio_state, n_audio_state)?;
 
-                let attn_v_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_audio_state,
-                    n_audio_state,
-                )?;
-                let attn_v_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let attn_v_w = new_tensor_2d(&mut tensor_ctx, wtype, n_audio_state, n_audio_state)?;
+                let attn_v_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
 
-                let attn_ln_1_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_audio_state,
-                    n_audio_state,
-                )?;
-                let attn_ln_1_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_audio_state)?;
+                let attn_ln_1_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_audio_state, n_audio_state)?;
+                let attn_ln_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
 
                 tensors.insert(
                     format!("encoder.blocks.{}.mlp_ln.weight", i),
@@ -1186,17 +1132,11 @@ impl WhisperModel {
                 })
             }
 
-            let d_pe = new_tensor_2d(
-                &mut tensor_ctx,
-                buf_model,
-                DType::F32,
-                n_text_state,
-                n_text_ctx,
-            )?;
+            let d_pe = new_tensor_2d(&mut tensor_ctx, DType::F32, n_text_state, n_text_ctx)?;
 
-            let d_te = new_tensor_2d(&mut tensor_ctx, buf_model, wtype, n_text_state, n_vocab)?;
-            let d_ln_w = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
-            let d_ln_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+            let d_te = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_vocab)?;
+            let d_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+            let d_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
             tensors.insert(
                 "decoder.positional_embedding".to_string(),
@@ -1210,111 +1150,49 @@ impl WhisperModel {
             tensors.insert("decoder.ln.bias".to_string(), &d_ln_b as *const GsTensor);
 
             for i in 0..n_text_layer {
-                let mlp_ln_w = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
-                let mlp_ln_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let mlp_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mlp_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let mlp_0_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    4 * n_text_state,
-                )?;
-                let mlp_0_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, 4 * n_text_state)?;
+                let mlp_0_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, 4 * n_text_state)?;
+                let mlp_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, 4 * n_text_state)?;
 
-                let mlp_1_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    4 * n_text_state,
-                    n_text_state,
-                )?;
-                let mlp_1_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let mlp_1_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, 4 * n_text_state, n_text_state)?;
+                let mlp_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let attn_ln_0_w =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
-                let attn_ln_0_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let attn_ln_0_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let attn_ln_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let attn_q_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
-                let attn_q_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let attn_q_w = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let attn_q_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let attn_k_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
+                let attn_k_w = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
 
-                let attn_v_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
-                let attn_v_b = new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let attn_v_w = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let attn_v_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let attn_ln_1_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
-                let attn_ln_1_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let attn_ln_1_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let attn_ln_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let cross_attn_ln_0_w =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
-                let cross_attn_ln_0_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let cross_attn_ln_0_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let cross_attn_ln_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let cross_attn_q_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
-                let cross_attn_q_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let cross_attn_q_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let cross_attn_q_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let cross_attn_k_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
+                let cross_attn_k_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
 
-                let cross_attn_v_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
-                let cross_attn_v_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let cross_attn_v_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let cross_attn_v_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let cross_attn_ln_1_w = new_tensor_2d(
-                    &mut tensor_ctx,
-                    buf_model,
-                    wtype,
-                    n_text_state,
-                    n_text_state,
-                )?;
-                let cross_attn_ln_1_b =
-                    new_tensor_1d(&mut tensor_ctx, buf_model, DType::F32, n_text_state)?;
+                let cross_attn_ln_1_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let cross_attn_ln_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
                 tensors.insert(
                     format!("decoder.blocks.{}.mlp_ln.weight", i),
@@ -1442,7 +1320,7 @@ impl WhisperModel {
             }
 
             //load kv memmory
-            let mut tensor_ctx: TensorContext = TensorContext::default();
+            let mut tensor_ctx: TensorContext = TensorContext::new(buf_memory);
 
             let n_text_ctx = hparams.n_text_ctx as usize;
             let n_text_state = hparams.n_text_state as usize;
@@ -1451,17 +1329,15 @@ impl WhisperModel {
             let n_mem = n_text_layer * n_text_ctx;
             let n_elements = n_text_state * n_mem;
 
-            let memory_k = new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
-            let memory_v = new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
+            let memory_k = new_tensor_1d(&mut tensor_ctx, DType::F16, n_elements)?;
+            let memory_v = new_tensor_1d(&mut tensor_ctx, DType::F16, n_elements)?;
 
             let n_audio_ctx = hparams.n_audio_ctx as usize;
 
             let n_mem = n_text_layer * n_audio_ctx;
             let n_elements = n_text_state * n_mem;
-            let memory_cross_k =
-                new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
-            let memory_cross_v =
-                new_tensor_1d(&mut tensor_ctx, &buf_memory, DType::F16, n_elements)?;
+            let memory_cross_k = new_tensor_1d(&mut tensor_ctx, DType::F16, n_elements)?;
+            let memory_cross_v = new_tensor_1d(&mut tensor_ctx, DType::F16, n_elements)?;
 
             WhisperModel {
                 mtype: mtype,
@@ -1794,39 +1670,23 @@ fn whisper_pcm_to_mel(ctx: &mut WhisperContext, samples: Arc<Vec<f32>>) -> WsRes
     Ok(())
 }
 
-fn conv_1d_1s(
-    ctx: &mut TensorContext,
-    buf: &[u8],
-    src: &GsTensor,
-    kernel: &GsTensor,
-) -> WsResult<GsTensor> {
+fn conv_1d_1s(ctx: &mut TensorContext, src: &GsTensor, kernel: &GsTensor) -> WsResult<GsTensor> {
     let ne = [src.shape()[0], kernel.shape()[2]];
-    let mut dst = new_tensor(ctx, buf, 2, DType::F32, Shape::from_array(ne))?;
+    let mut dst = new_tensor(ctx, 2, DType::F32, Shape::from_array(ne))?;
     galois::op::galois_conv_1d_1s(src, kernel, &mut dst)?;
     Ok(dst)
 }
 
-fn conv_1d_2s(
-    ctx: &mut TensorContext,
-    buf: &[u8],
-    src: &GsTensor,
-    kernel: &GsTensor,
-) -> WsResult<GsTensor> {
+fn conv_1d_2s(ctx: &mut TensorContext, src: &GsTensor, kernel: &GsTensor) -> WsResult<GsTensor> {
     let ne = [src.shape()[0] / 2, kernel.shape()[2]];
-    let mut dst = new_tensor(ctx, buf, 2, DType::F32, Shape::from_array(ne))?;
+    let mut dst = new_tensor(ctx, 2, DType::F32, Shape::from_array(ne))?;
     galois::op::galois_conv_1d_2s(src, kernel, &mut dst)?;
     Ok(dst)
 }
 
-fn repeat(
-    ctx: &mut TensorContext,
-    buf: &[u8],
-    src: &GsTensor,
-    cur: &GsTensor,
-) -> WsResult<GsTensor> {
+fn repeat(ctx: &mut TensorContext, src: &GsTensor, cur: &GsTensor) -> WsResult<GsTensor> {
     let mut dst = new_tensor(
         ctx,
-        buf,
         cur.n_dims(),
         src.dtype(),
         Shape::from_slice(cur.shape()),
@@ -1835,14 +1695,14 @@ fn repeat(
     Ok(dst)
 }
 
-fn add(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor, b: &GsTensor) -> WsResult<GsTensor> {
-    let mut dst = dup_tensor(ctx, buf, a)?;
+fn add(ctx: &mut TensorContext, a: &GsTensor, b: &GsTensor) -> WsResult<GsTensor> {
+    let mut dst = dup_tensor(ctx, a)?;
     galois::op::galois_add(a, b, &mut dst)?;
     Ok(dst)
 }
 
-fn gelu(ctx: &mut TensorContext, buf: &[u8], a: &GsTensor) -> WsResult<GsTensor> {
-    let mut dst = dup_tensor(ctx, buf, a)?;
+fn gelu(ctx: &mut TensorContext, a: &GsTensor) -> WsResult<GsTensor> {
+    let mut dst = dup_tensor(ctx, a)?;
     galois::op::galois_gelu(a, &mut dst)?;
     Ok(dst)
 }
@@ -1862,8 +1722,8 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     let n_mels = hparams.n_mels as usize;
     assert!(mel_inp.n_mel == n_mels as usize);
     let buf_compute = &wctx.buf_compute;
-    let mut ctx0: TensorContext = TensorContext::default();
-    let mel = new_tensor_2d(&mut ctx0, &buf_compute, DType::F32, 2 * n_ctx, n_mels)?;
+    let mut ctx0: TensorContext = TensorContext::new(buf_compute);
+    let mel = new_tensor_2d(&mut ctx0, DType::F32, 2 * n_ctx, n_mels)?;
     assert!(mel.dtype() == DType::F32);
     {
         let dst = unsafe { mel.as_slice_mut::<f32>() };
@@ -1881,15 +1741,15 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         let y: f32 = dst.iter().sum();
         println!("y:{:?}", y);
     }
-    let mut cur = conv_1d_1s(&mut ctx0, &buf_compute, &mel, &model.e_conv_1_w)?;
-    let mut tmp = repeat(&mut ctx0, &buf_compute, &model.e_conv_1_b, &cur)?;
-    cur = add(&mut ctx0, &buf_compute, &tmp, &cur)?;
-    cur = gelu(&mut ctx0, &buf_compute, &cur)?;
-    cur = conv_1d_2s(&mut ctx0, &buf_compute, &cur, &model.e_conv_2_w)?;
+    let mut cur = conv_1d_1s(&mut ctx0, &mel, &model.e_conv_1_w)?;
+    let mut tmp = repeat(&mut ctx0, &model.e_conv_1_b, &cur)?;
+    cur = add(&mut ctx0, &tmp, &cur)?;
+    cur = gelu(&mut ctx0, &cur)?;
+    cur = conv_1d_2s(&mut ctx0, &cur, &model.e_conv_2_w)?;
 
-    tmp = repeat(&mut ctx0, &buf_compute, &model.e_conv_2_b, &cur)?;
-    cur = add(&mut ctx0, &buf_compute, &tmp, &cur)?;
-    cur = gelu(&mut ctx0, &buf_compute, &cur)?;
+    tmp = repeat(&mut ctx0, &model.e_conv_2_b, &cur)?;
+    cur = add(&mut ctx0, &tmp, &cur)?;
+    cur = gelu(&mut ctx0, &cur)?;
 
     let iter = 0;
 
@@ -1904,7 +1764,11 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         e_pe_offset,
     )?;
 
-    cur = add(&mut ctx0, &buf_compute, &e_pe, &cur.transpose(0, 1)?)?;
+    cur = add(&mut ctx0, &e_pe, &cur.transpose(0, 1)?)?;
+
+    // for i1 in 0..n_layer {
+    //     let layer = model.layers_encoder.get(i1).unwrap();
+    // }
 
     let x: &mut [f32] = unsafe { cur.as_slice_mut::<f32>() };
     let sum: f32 = x.iter().sum();
