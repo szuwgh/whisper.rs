@@ -1707,6 +1707,12 @@ fn gelu(ctx: &mut TensorContext, a: &GsTensor) -> WsResult<GsTensor> {
     Ok(dst)
 }
 
+fn norm(ctx: &mut TensorContext, a: &GsTensor) -> WsResult<GsTensor> {
+    let mut dst = dup_tensor(ctx, a)?;
+    galois::op::galois_norm(a, &mut dst)?;
+    Ok(dst)
+}
+
 fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) -> WsResult<()> {
     let model = &wctx.model;
     let mel_inp = &wctx.mel;
@@ -1743,7 +1749,9 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     }
     let mut cur = conv_1d_1s(&mut ctx0, &mel, &model.e_conv_1_w)?;
     let mut tmp = repeat(&mut ctx0, &model.e_conv_1_b, &cur)?;
+
     cur = add(&mut ctx0, &tmp, &cur)?;
+
     cur = gelu(&mut ctx0, &cur)?;
     cur = conv_1d_2s(&mut ctx0, &cur, &model.e_conv_2_w)?;
 
@@ -1765,14 +1773,29 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     )?;
 
     cur = add(&mut ctx0, &e_pe, &cur.transpose(0, 1)?)?;
-
-    // for i1 in 0..n_layer {
-    //     let layer = model.layers_encoder.get(i1).unwrap();
-    // }
+    let inp_L = &cur;
+    for i1 in 0..n_layer {
+        let mut ctx_l: TensorContext = TensorContext::new(&wctx.buf_compute_layer);
+        let layer = model.layers_encoder.get(i1).unwrap();
+        cur = norm(&mut ctx_l, inp_L)?;
+        break;
+    }
 
     let x: &mut [f32] = unsafe { cur.as_slice_mut::<f32>() };
-    let sum: f32 = x.iter().sum();
-    println!("conv_1d_2s:{:?}", sum);
+    let mut sum: f64 = 0.0;
+    for i in 0..cur.elem_count() {
+        sum += (x[i]*x[i]) as f64;
+        if i < 10 || i > cur.elem_count() - 10 {
+            print!("{:?},", x[i])
+        }
+    }
+
+    println!(
+        "sum:{:?},shape:{:?},stride:{:?}",
+        sum,
+        cur.shape(),
+        cur.dim().stride_4d()
+    );
 
     Ok(())
 }
