@@ -1784,10 +1784,10 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     let x: &mut [f32] = unsafe { cur.as_slice_mut::<f32>() };
     let mut sum: f64 = 0.0;
     for i in 0..cur.elem_count() {
-        sum += (x[i]*x[i]) as f64;
-        if i < 10 || i > cur.elem_count() - 10 {
-            print!("{:?},", x[i])
-        }
+        sum += x[i].abs() as f64;
+        // if i < 10 || i > cur.elem_count() - 10 {
+        //     print!("{:?},", x[i])
+        // }
     }
 
     println!(
