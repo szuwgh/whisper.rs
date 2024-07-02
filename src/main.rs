@@ -8,6 +8,7 @@ use galois::Tensor as GsTensor;
 use galois::F16;
 use galois::{DType, GS_TYPE_SIZE};
 use lazy_static::lazy_static;
+use num_traits::float::Float;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
@@ -20,7 +21,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::vec;
 use thiserror::Error;
-
 // type GGMLFp16T = u16;
 
 // #[derive(Clone, Copy)]
@@ -1434,6 +1434,22 @@ impl WhisperModel {
                         // let mut x = vec![0u8; tensor.as_bytes_mut().len()];
                         r.read_exact(tensor.as_bytes_mut())?;
                     }
+                    // if name == "encoder.blocks.0.attn.query.weight".to_string() {
+                    //     let x: &[F16] = unsafe { tensor.as_slice::<F16>() };
+                    //     let mut sum: f64 = 0.0;
+                    //     for i in 0..x.len() {
+                    //         sum += x[i].abs().to_f64();
+                    //         if i < 10 || i > tensor.elem_count() - 10 {
+                    //             print!("{:?},", x[i])
+                    //         }
+                    //     }
+                    //     println!(
+                    //         "encoder.blocks.0.attn.query.weight:{:?},shape:{:?},stride:{:?}",
+                    //         sum,
+                    //         tensor.shape(),
+                    //         tensor.dim().stride_4d()
+                    //     );
+                    // }
 
                     // println!("name:{},{}", name, tensor.as_bytes_mut().len());
 
@@ -1820,13 +1836,27 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         let mut ctx_l: TensorContext = TensorContext::new(&wctx.buf_compute_layer);
         let layer = model.layers_encoder.get(i1).unwrap();
         // norm
-        {
-            cur = norm(&mut ctx_l, inp_L)?;
-            let mut tmp = repeat(&mut ctx_l, &layer.attn_ln_0_w, &cur)?;
-            cur = mul(&mut ctx_l, &tmp, &cur)?;
-            tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
-            cur = add(&mut ctx_l, &tmp, &cur)?;
-        };
+
+        cur = norm(&mut ctx_l, inp_L)?;
+        tmp = repeat(&mut ctx_l, &layer.attn_ln_0_w, &cur)?;
+        cur = mul(&mut ctx_l, &tmp, &cur)?;
+        tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
+        cur = add(&mut ctx_l, &tmp, &cur)?;
+
+        let x: &[F16] = unsafe { layer.attn_q_w.as_slice::<F16>() };
+        let mut sum: f64 = 0.0;
+        for i in 0..layer.attn_q_w.elem_count() {
+            sum += x[i].abs().to_f64();
+            // if i < 10 || i > cur.elem_count() - 10 {
+            //     print!("{:?},", x[i])
+            // }
+        }
+        println!(
+            "attn_q_w:{:?},shape:{:?},stride:{:?}",
+            sum,
+            layer.mlp_ln_w.shape(),
+            layer.mlp_ln_w.dim().stride_4d()
+        );
         cur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
         break;
     }
