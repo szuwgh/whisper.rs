@@ -1835,9 +1835,9 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     let mut sum: f64 = 0.0;
     for i in 0..x.len() {
         sum += x[i].abs() as f64;
-        // if i < 10 || i > cur.elem_count() - 10 {
-        //     print!("{:?},", x[i])
-        // }
+        if i < 10 || i > cur.elem_count() - 10 {
+            print!("{:?},", x[i])
+        }
     }
 
     println!(
