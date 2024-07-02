@@ -941,7 +941,7 @@ impl WhisperModel {
                 ctx_size as f32 / (1024.0 * 1024.0),
             );
         }
-        let mut tensors: HashMap<String, *const GsTensor> = HashMap::new();
+        let mut tensors: HashMap<String, *mut GsTensor> = HashMap::new();
 
         let mut whisper_mode = {
             let mut tensor_ctx = TensorContext::new(buf_model);
@@ -956,16 +956,16 @@ impl WhisperModel {
             let n_mels = hparams.n_mels as usize;
 
             // encoder
-            let e_pe = new_tensor_2d(&mut tensor_ctx, DType::F32, n_audio_state, n_audio_ctx)?;
-            let e_conv_1_w = new_tensor_3d(&mut tensor_ctx, wtype, 3, n_mels, n_audio_state)?;
-            let e_conv_1_b = new_tensor_2d(&mut tensor_ctx, DType::F32, 1, n_audio_state)?;
+            let mut e_pe = new_tensor_2d(&mut tensor_ctx, DType::F32, n_audio_state, n_audio_ctx)?;
+            let mut e_conv_1_w = new_tensor_3d(&mut tensor_ctx, wtype, 3, n_mels, n_audio_state)?;
+            let mut e_conv_1_b = new_tensor_2d(&mut tensor_ctx, DType::F32, 1, n_audio_state)?;
 
-            let e_conv_2_w =
+            let mut e_conv_2_w =
                 new_tensor_3d(&mut tensor_ctx, wtype, 3, n_audio_state, n_audio_state)?;
-            let e_conv_2_b = new_tensor_2d(&mut tensor_ctx, DType::F32, 1, n_audio_state)?;
+            let mut e_conv_2_b = new_tensor_2d(&mut tensor_ctx, DType::F32, 1, n_audio_state)?;
 
-            let e_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
-            let e_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+            let mut e_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+            let mut e_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
 
             // let weights = Box::new([
             //     e_pe, e_conv_1_w, e_conv_1_b, e_conv_2_w, e_conv_2_b, e_ln_w, e_ln_b, d_pe, d_te,
@@ -973,31 +973,31 @@ impl WhisperModel {
             // ]);
             tensors.insert(
                 "encoder.positional_embedding".to_string(),
-                &e_pe as *const GsTensor,
+                &mut e_pe as *mut GsTensor,
             );
             tensors.insert(
                 "encoder.conv1.weight".to_string(),
-                &e_conv_1_w as *const GsTensor,
+                &mut e_conv_1_w as *mut GsTensor,
             );
             tensors.insert(
                 "encoder.conv1.bias".to_string(),
-                &e_conv_1_b as *const GsTensor,
+                &mut e_conv_1_b as *mut GsTensor,
             );
             tensors.insert(
                 "encoder.conv2.weight".to_string(),
-                &e_conv_2_w as *const GsTensor,
+                &mut e_conv_2_w as *mut GsTensor,
             );
             tensors.insert(
                 "encoder.conv2.bias".to_string(),
-                &e_conv_2_b as *const GsTensor,
+                &mut e_conv_2_b as *mut GsTensor,
             );
             tensors.insert(
                 "encoder.ln_post.weight".to_string(),
-                &e_ln_w as *const GsTensor,
+                &mut e_ln_w as *mut GsTensor,
             );
             tensors.insert(
                 "encoder.ln_post.bias".to_string(),
-                &e_ln_b as *const GsTensor,
+                &mut e_ln_b as *mut GsTensor,
             );
 
             let mut layers_encoder: Vec<WhisperLayerEncoder> = Vec::with_capacity(n_audio_layer);
@@ -1011,6 +1011,7 @@ impl WhisperModel {
                 let mlp_1_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, 4 * n_audio_state, n_audio_state)?;
                 let mlp_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
+
                 let attn_ln_0_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
                 let attn_ln_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
                 let attn_q_w = new_tensor_2d(&mut tensor_ctx, wtype, n_audio_state, n_audio_state)?;
@@ -1024,79 +1025,6 @@ impl WhisperModel {
                 let attn_ln_1_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, n_audio_state, n_audio_state)?;
                 let attn_ln_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_audio_state)?;
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.mlp_ln.weight", i),
-                    &mlp_ln_w as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.mlp_ln.bias", i),
-                    &mlp_ln_b as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.mlp.0.weight", i),
-                    &mlp_0_w as *const GsTensor,
-                );
-                tensors.insert(
-                    format!("encoder.blocks.{}.mlp.0.bias", i),
-                    &mlp_0_b as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.mlp.2.weight", i),
-                    &mlp_1_w as *const GsTensor,
-                );
-                tensors.insert(
-                    format!("encoder.blocks.{}.mlp.2.bias", i),
-                    &mlp_1_b as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn_ln.weight", i),
-                    &mlp_1_b as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn_ln.bias", i),
-                    &attn_ln_0_b as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn.query.weight", i),
-                    &attn_q_w as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn.query.bias", i),
-                    &attn_q_b as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn.key.weight", i),
-                    &attn_k_w as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn.value.weight", i),
-                    &attn_v_w as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn.value.bias", i),
-                    &attn_v_b as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn.out.weight", i),
-                    &attn_ln_1_w as *const GsTensor,
-                );
-
-                tensors.insert(
-                    format!("encoder.blocks.{}.attn.out.bias", i),
-                    &attn_ln_1_b as *const GsTensor,
-                );
 
                 layers_encoder.push(WhisperLayerEncoder {
                     // encoder.blocks.*.attn_ln
@@ -1129,166 +1057,250 @@ impl WhisperModel {
                     // encoder.blocks.*.mlp.2
                     mlp_1_w,
                     mlp_1_b,
-                })
+                });
+
+                let encoder = layers_encoder.last_mut().unwrap();
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.mlp_ln.weight", i),
+                    &mut encoder.mlp_ln_w as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.mlp_ln.bias", i),
+                    &mut encoder.mlp_ln_b as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.mlp.0.weight", i),
+                    &mut encoder.mlp_0_w as *mut GsTensor,
+                );
+                tensors.insert(
+                    format!("encoder.blocks.{}.mlp.0.bias", i),
+                    &mut encoder.mlp_0_b as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.mlp.2.weight", i),
+                    &mut encoder.mlp_1_w as *mut GsTensor,
+                );
+                tensors.insert(
+                    format!("encoder.blocks.{}.mlp.2.bias", i),
+                    &mut encoder.mlp_1_b as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn_ln.weight", i),
+                    &mut encoder.attn_ln_0_w as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn_ln.bias", i),
+                    &mut encoder.attn_ln_0_b as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn.query.weight", i),
+                    &mut encoder.attn_q_w as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn.query.bias", i),
+                    &mut encoder.attn_q_b as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn.key.weight", i),
+                    &mut encoder.attn_k_w as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn.value.weight", i),
+                    &mut encoder.attn_v_w as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn.value.bias", i),
+                    &mut encoder.attn_v_b as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn.out.weight", i),
+                    &mut encoder.attn_ln_1_w as *mut GsTensor,
+                );
+
+                tensors.insert(
+                    format!("encoder.blocks.{}.attn.out.bias", i),
+                    &mut encoder.attn_ln_1_b as *mut GsTensor,
+                );
             }
 
-            let d_pe = new_tensor_2d(&mut tensor_ctx, DType::F32, n_text_state, n_text_ctx)?;
+            let mut d_pe = new_tensor_2d(&mut tensor_ctx, DType::F32, n_text_state, n_text_ctx)?;
 
-            let d_te = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_vocab)?;
-            let d_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-            let d_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+            let mut d_te = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_vocab)?;
+            let mut d_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+            let mut d_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
             tensors.insert(
                 "decoder.positional_embedding".to_string(),
-                &d_pe as *const GsTensor,
+                &mut d_pe as *mut GsTensor,
             );
             tensors.insert(
                 "decoder.token_embedding.weight".to_string(),
-                &d_te as *const GsTensor,
+                &mut d_te as *mut GsTensor,
             );
-            tensors.insert("decoder.ln.weight".to_string(), &d_ln_w as *const GsTensor);
-            tensors.insert("decoder.ln.bias".to_string(), &d_ln_b as *const GsTensor);
+            tensors.insert(
+                "decoder.ln.weight".to_string(),
+                &mut d_ln_w as *mut GsTensor,
+            );
+            tensors.insert("decoder.ln.bias".to_string(), &mut d_ln_b as *mut GsTensor);
 
             for i in 0..n_text_layer {
-                let mlp_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-                let mlp_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut mlp_ln_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut mlp_ln_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let mlp_0_w =
+                let mut mlp_0_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, 4 * n_text_state)?;
-                let mlp_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, 4 * n_text_state)?;
+                let mut mlp_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, 4 * n_text_state)?;
 
-                let mlp_1_w =
+                let mut mlp_1_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, 4 * n_text_state, n_text_state)?;
-                let mlp_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut mlp_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let attn_ln_0_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-                let attn_ln_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut attn_ln_0_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut attn_ln_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let attn_q_w = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
-                let attn_q_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-
-                let attn_k_w = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
-
-                let attn_v_w = new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
-                let attn_v_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-
-                let attn_ln_1_w =
+                let mut attn_q_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
-                let attn_ln_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut attn_q_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let cross_attn_ln_0_w = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-                let cross_attn_ln_0_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-
-                let cross_attn_q_w =
-                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
-                let cross_attn_q_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
-
-                let cross_attn_k_w =
+                let mut attn_k_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
 
-                let cross_attn_v_w =
+                let mut attn_v_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
-                let cross_attn_v_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut attn_v_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
-                let cross_attn_ln_1_w =
+                let mut attn_ln_1_w =
                     new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
-                let cross_attn_ln_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut attn_ln_1_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+
+                let mut cross_attn_ln_0_w =
+                    new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+                let mut cross_attn_ln_0_b =
+                    new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+
+                let mut cross_attn_q_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let mut cross_attn_q_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+
+                let mut cross_attn_k_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+
+                let mut cross_attn_v_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let mut cross_attn_v_b = new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
+
+                let mut cross_attn_ln_1_w =
+                    new_tensor_2d(&mut tensor_ctx, wtype, n_text_state, n_text_state)?;
+                let mut cross_attn_ln_1_b =
+                    new_tensor_1d(&mut tensor_ctx, DType::F32, n_text_state)?;
 
                 tensors.insert(
                     format!("decoder.blocks.{}.mlp_ln.weight", i),
-                    &mlp_ln_w as *const GsTensor,
+                    &mut mlp_ln_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.mlp_ln.bias", i),
-                    &mlp_ln_b as *const GsTensor,
+                    &mut mlp_ln_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.mlp.0.weight", i),
-                    &mlp_0_w as *const GsTensor,
+                    &mut mlp_0_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.mlp.0.bias", i),
-                    &mlp_0_b as *const GsTensor,
+                    &mut mlp_0_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.mlp.2.weight", i),
-                    &mlp_1_w as *const GsTensor,
+                    &mut mlp_1_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.mlp.2.bias", i),
-                    &mlp_1_b as *const GsTensor,
+                    &mut mlp_1_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn_ln.weight", i),
-                    &attn_ln_0_w as *const GsTensor,
+                    &mut attn_ln_0_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn_ln.bias", i),
-                    &attn_ln_0_b as *const GsTensor,
+                    &mut attn_ln_0_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn.query.weight", i),
-                    &attn_q_w as *const GsTensor,
+                    &mut attn_q_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn.query.bias", i),
-                    &attn_q_b as *const GsTensor,
+                    &mut attn_q_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn.key.weight", i),
-                    &attn_k_w as *const GsTensor,
+                    &mut attn_k_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn.value.weight", i),
-                    &attn_v_w as *const GsTensor,
+                    &mut attn_v_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn.value.bias", i),
-                    &attn_v_b as *const GsTensor,
+                    &mut attn_v_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn.out.weight", i),
-                    &attn_ln_1_w as *const GsTensor,
+                    &mut attn_ln_1_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.attn.out.bias", i),
-                    &attn_ln_1_b as *const GsTensor,
+                    &mut attn_ln_1_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn_ln.weight", i),
-                    &cross_attn_ln_0_w as *const GsTensor,
+                    &mut cross_attn_ln_0_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn_ln.bias", i),
-                    &cross_attn_ln_0_b as *const GsTensor,
+                    &mut cross_attn_ln_0_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn.query.weight", i),
-                    &cross_attn_q_w as *const GsTensor,
+                    &mut cross_attn_q_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn.query.bias", i),
-                    &cross_attn_q_b as *const GsTensor,
+                    &mut cross_attn_q_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn.key.weight", i),
-                    &cross_attn_k_w as *const GsTensor,
+                    &mut cross_attn_k_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn.value.weight", i),
-                    &cross_attn_v_w as *const GsTensor,
+                    &mut cross_attn_v_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn.value.bias", i),
-                    &cross_attn_v_b as *const GsTensor,
+                    &mut cross_attn_v_b as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn.out.weight", i),
-                    &cross_attn_ln_1_w as *const GsTensor,
+                    &mut cross_attn_ln_1_w as *mut GsTensor,
                 );
                 tensors.insert(
                     format!("decoder.blocks.{}.cross_attn.out.bias", i),
-                    &cross_attn_ln_1_b as *const GsTensor,
+                    &mut cross_attn_ln_1_b as *mut GsTensor,
                 );
 
                 layers_decoder.push(WhisperLayerDecoder {
@@ -1316,7 +1328,7 @@ impl WhisperModel {
                     mlp_0_b,
                     mlp_1_w,
                     mlp_1_b,
-                })
+                });
             }
 
             //load kv memmory
@@ -1375,6 +1387,7 @@ impl WhisperModel {
                 let mut nelements: usize = 1;
                 let mut ne: [usize; 3] = [1, 1, 1];
                 // let n_dims = 3; // Assume this value is set appropriately
+                // println!("n_dims:{}", n_dims);
                 for i in 0..n_dims as usize {
                     ne[i] = r.read_i32::<Endian>()? as usize;
                     nelements *= ne[i];
@@ -1384,10 +1397,10 @@ impl WhisperModel {
                 r.read_exact(&mut buffer)?;
                 let name = String::from_utf8_lossy(&buffer).to_string();
                 let ref_tensor = tensors
-                    .get(name.as_str())
+                    .get_mut(name.as_str())
                     .ok_or(WsError::UnknownTensor(name.clone()))?;
 
-                if let Some(tensor) = unsafe { ref_tensor.as_ref() } {
+                if let Some(tensor) = unsafe { (*ref_tensor).as_mut() } {
                     if tensor.elem_count() != nelements {
                         return Err(WsError::WrongSizeTensor(
                             name,
@@ -1417,8 +1430,13 @@ impl WhisperModel {
                             nelements * bpe,
                         ));
                     }
-                    r.read_exact(tensor.as_bytes_mut())?;
-                    //  println!("name:{}", name);
+                    {
+                        // let mut x = vec![0u8; tensor.as_bytes_mut().len()];
+                        r.read_exact(tensor.as_bytes_mut())?;
+                    }
+
+                    // println!("name:{},{}", name, tensor.as_bytes_mut().len());
+
                     total_size += tensor.nbytes();
                     whisper_mode.n_loaded += 1;
                     match r.fill_buf() {
@@ -1670,17 +1688,17 @@ fn whisper_pcm_to_mel(ctx: &mut WhisperContext, samples: Arc<Vec<f32>>) -> WsRes
     Ok(())
 }
 
-fn conv_1d_1s(ctx: &mut TensorContext, src: &GsTensor, kernel: &GsTensor) -> WsResult<GsTensor> {
+fn conv_1d_1s(ctx: &mut TensorContext, kernel: &GsTensor, src: &GsTensor) -> WsResult<GsTensor> {
     let ne = [src.shape()[0], kernel.shape()[2]];
     let mut dst = new_tensor(ctx, 2, DType::F32, Shape::from_array(ne))?;
-    galois::op::galois_conv_1d_1s(src, kernel, &mut dst)?;
+    galois::op::galois_conv_1d_1s(kernel, src, &mut dst)?;
     Ok(dst)
 }
 
-fn conv_1d_2s(ctx: &mut TensorContext, src: &GsTensor, kernel: &GsTensor) -> WsResult<GsTensor> {
+fn conv_1d_2s(ctx: &mut TensorContext, kernel: &GsTensor, src: &GsTensor) -> WsResult<GsTensor> {
     let ne = [src.shape()[0] / 2, kernel.shape()[2]];
     let mut dst = new_tensor(ctx, 2, DType::F32, Shape::from_array(ne))?;
-    galois::op::galois_conv_1d_2s(src, kernel, &mut dst)?;
+    galois::op::galois_conv_1d_2s(kernel, src, &mut dst)?;
     Ok(dst)
 }
 
@@ -1698,6 +1716,29 @@ fn repeat(ctx: &mut TensorContext, src: &GsTensor, cur: &GsTensor) -> WsResult<G
 fn add(ctx: &mut TensorContext, a: &GsTensor, b: &GsTensor) -> WsResult<GsTensor> {
     let mut dst = dup_tensor(ctx, a)?;
     galois::op::galois_add(a, b, &mut dst)?;
+    Ok(dst)
+}
+
+fn matmul(ctx: &mut TensorContext, a: &GsTensor, b: &GsTensor) -> WsResult<GsTensor> {
+    let ne = [
+        a.ggml_shape()[1],
+        b.ggml_shape()[1],
+        a.ggml_shape()[2],
+        b.ggml_shape()[3],
+    ];
+    let mut dst = new_tensor(
+        ctx,
+        std::cmp::min(a.n_dims(), b.n_dims()),
+        DType::F32,
+        Shape::from_array(ne),
+    )?;
+    galois::op::galois_matmul(a, b, &mut dst)?;
+    Ok(dst)
+}
+
+fn mul(ctx: &mut TensorContext, a: &GsTensor, b: &GsTensor) -> WsResult<GsTensor> {
+    let mut dst = dup_tensor(ctx, a)?;
+    galois::op::galois_mul(a, b, &mut dst)?;
     Ok(dst)
 }
 
@@ -1725,11 +1766,12 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     let n_state = hparams.n_audio_state as usize;
     let n_head = hparams.n_audio_head as usize;
     let n_layer = hparams.n_audio_layer as usize;
+
     let n_mels = hparams.n_mels as usize;
     assert!(mel_inp.n_mel == n_mels as usize);
     let buf_compute = &wctx.buf_compute;
     let mut ctx0: TensorContext = TensorContext::new(buf_compute);
-    let mel = new_tensor_2d(&mut ctx0, DType::F32, 2 * n_ctx, n_mels)?;
+    let mut mel = new_tensor_2d(&mut ctx0, DType::F32, 2 * n_ctx, n_mels)?;
     assert!(mel.dtype() == DType::F32);
     {
         let dst = unsafe { mel.as_slice_mut::<f32>() };
@@ -1747,13 +1789,13 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         let y: f32 = dst.iter().sum();
         println!("y:{:?}", y);
     }
-    let mut cur = conv_1d_1s(&mut ctx0, &mel, &model.e_conv_1_w)?;
+    let mut cur = conv_1d_1s(&mut ctx0, &model.e_conv_1_w, &mel)?;
     let mut tmp = repeat(&mut ctx0, &model.e_conv_1_b, &cur)?;
 
     cur = add(&mut ctx0, &tmp, &cur)?;
 
     cur = gelu(&mut ctx0, &cur)?;
-    cur = conv_1d_2s(&mut ctx0, &cur, &model.e_conv_2_w)?;
+    cur = conv_1d_2s(&mut ctx0, &model.e_conv_2_w, &cur)?;
 
     tmp = repeat(&mut ctx0, &model.e_conv_2_b, &cur)?;
     cur = add(&mut ctx0, &tmp, &cur)?;
@@ -1777,13 +1819,21 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
     for i1 in 0..n_layer {
         let mut ctx_l: TensorContext = TensorContext::new(&wctx.buf_compute_layer);
         let layer = model.layers_encoder.get(i1).unwrap();
-        cur = norm(&mut ctx_l, inp_L)?;
+        // norm
+        {
+            cur = norm(&mut ctx_l, inp_L)?;
+            let mut tmp = repeat(&mut ctx_l, &layer.attn_ln_0_w, &cur)?;
+            cur = mul(&mut ctx_l, &tmp, &cur)?;
+            tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
+            cur = add(&mut ctx_l, &tmp, &cur)?;
+        };
+        cur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
         break;
     }
 
-    let x: &mut [f32] = unsafe { cur.as_slice_mut::<f32>() };
+    let x: &[f32] = unsafe { cur.as_slice::<f32>() };
     let mut sum: f64 = 0.0;
-    for i in 0..cur.elem_count() {
+    for i in 0..x.len() {
         sum += x[i].abs() as f64;
         // if i < 10 || i > cur.elem_count() - 10 {
         //     print!("{:?},", x[i])
@@ -1809,7 +1859,7 @@ fn main() {
     let model_path = "/opt/cproject/whisper.cpp-1.0.3/models/ggml-tiny.en.bin";
     let mut wctx = WhisperContext::new(model_path).unwrap();
     whisper_pcm_to_mel(&mut wctx, Arc::new(samples)).unwrap();
-    whisper_encode(&mut wctx, 4, 0).unwrap();
+    whisper_encode(&mut wctx, 1, 0).unwrap();
 }
 
 #[cfg(test)]
@@ -1835,22 +1885,22 @@ mod tests {
     }
 
     struct B {
-        a: A,
+        a: Vec<A>,
     }
 
     #[test]
     fn test_a() {
-        let x = A {
+        let mut x = A {
             a: 5,
             name: "123".to_string(),
         };
-        let y = &x as *const A;
-        let b = B { a: x };
+        let y = &mut x as *mut A;
+        let b = B { a: vec![x] };
 
         if let Some(a1) = unsafe { y.as_ref() } {
             println!("{:?}", a1.name);
         }
-        drop(y);
+
         println!("{:?}", b.a)
     }
 }
