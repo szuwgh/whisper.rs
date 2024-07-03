@@ -1854,8 +1854,13 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         println!(
             "attn_q_w:{:?},shape:{:?},stride:{:?}",
             sum,
-            layer.mlp_ln_w.shape(),
-            layer.mlp_ln_w.dim().stride_4d()
+            layer.attn_q_w.shape(),
+            layer.attn_q_w.dim().stride_4d()
+        );
+        println!(
+            "cur:,shape:{:?},stride:{:?}",
+            cur.ggml_shape(),
+            cur.dim().stride_4d()
         );
         cur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
         break;
@@ -1863,17 +1868,17 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
 
     let x: &[f32] = unsafe { cur.as_slice::<f32>() };
     let mut sum: f64 = 0.0;
-    for i in 0..x.len() {
+    for i in 0..cur.elem_count() {
         sum += x[i].abs() as f64;
-        if i < 10 || i > cur.elem_count() - 10 {
-            print!("{:?},", x[i])
-        }
+        // if i < 10 || i > cur.elem_count() - 10 {
+        //     print!("{:?},", x[i])
+        // }
     }
 
     println!(
         "sum:{:?},shape:{:?},stride:{:?}",
         sum,
-        cur.shape(),
+        cur.ggml_shape(),
         cur.dim().stride_4d()
     );
 
