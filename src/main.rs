@@ -1843,44 +1843,34 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
         cur = add(&mut ctx_l, &tmp, &cur)?;
 
-        let x: &[F16] = unsafe { layer.attn_q_w.as_slice::<F16>() };
+        let mut qcur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
+        tmp = repeat(&mut ctx_l, &layer.attn_q_b, &qcur)?;
+        qcur = add(&mut ctx_l, &tmp, &qcur)?;
+
+        let kcur = matmul(&mut ctx_l, &layer.attn_k_w, &cur)?;
+
+        let mut vcur = matmul(&mut ctx_l, &layer.attn_v_w, &cur)?;
+
+        tmp = repeat(&mut ctx_l, &layer.attn_v_b, &vcur)?;
+        vcur = add(&mut ctx_l, &tmp, &vcur)?;
+
+        let x: &[f32] = unsafe { vcur.as_slice::<f32>() };
         let mut sum: f64 = 0.0;
-        for i in 0..layer.attn_q_w.elem_count() {
-            sum += x[i].abs().to_f64();
+        for i in 0..vcur.elem_count() {
+            sum += x[i].abs() as f64;
             // if i < 10 || i > cur.elem_count() - 10 {
             //     print!("{:?},", x[i])
             // }
         }
+
         println!(
-            "attn_q_w:{:?},shape:{:?},stride:{:?}",
+            "vcur,sum:{:?},shape:{:?},stride:{:?}",
             sum,
-            layer.attn_q_w.shape(),
-            layer.attn_q_w.dim().stride_4d()
+            vcur.ggml_shape(),
+            vcur.dim().stride_4d()
         );
-        println!(
-            "cur:,shape:{:?},stride:{:?}",
-            cur.ggml_shape(),
-            cur.dim().stride_4d()
-        );
-        cur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
         break;
     }
-
-    let x: &[f32] = unsafe { cur.as_slice::<f32>() };
-    let mut sum: f64 = 0.0;
-    for i in 0..cur.elem_count() {
-        sum += x[i].abs() as f64;
-        // if i < 10 || i > cur.elem_count() - 10 {
-        //     print!("{:?},", x[i])
-        // }
-    }
-
-    println!(
-        "sum:{:?},shape:{:?},stride:{:?}",
-        sum,
-        cur.ggml_shape(),
-        cur.dim().stride_4d()
-    );
 
     Ok(())
 }
