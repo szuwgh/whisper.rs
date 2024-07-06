@@ -1729,6 +1729,12 @@ fn repeat(ctx: &mut TensorContext, src: &GsTensor, cur: &GsTensor) -> WsResult<G
     Ok(dst)
 }
 
+fn cpy(src: &GsTensor, cur: &GsTensor) -> WsResult<GsTensor> {
+    let mut dst = cur.view();
+    galois::op::galois_cpy(src, &mut dst)?;
+    Ok(dst)
+}
+
 fn add(ctx: &mut TensorContext, a: &GsTensor, b: &GsTensor) -> WsResult<GsTensor> {
     let mut dst = dup_tensor(ctx, a)?;
     galois::op::galois_add(a, b, &mut dst)?;
@@ -1854,10 +1860,17 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         tmp = repeat(&mut ctx_l, &layer.attn_v_b, &vcur)?;
         vcur = add(&mut ctx_l, &tmp, &vcur)?;
 
-        let x: &[f32] = unsafe { vcur.as_slice::<f32>() };
+        tmp = cpy(
+            &qcur,
+            &new_tensor_3d(&mut ctx_l, DType::F16, n_state / n_head, n_head, n_ctx)?,
+        )?;
+
+        let Q = tmp.permute(0, 2, 1, 3)?;
+
+        let x: &[F16] = unsafe { Q.as_slice::<F16>() };
         let mut sum: f64 = 0.0;
-        for i in 0..vcur.elem_count() {
-            sum += x[i].abs() as f64;
+        for i in 0..Q.elem_count() {
+            sum += x[i].to_f32().abs() as f64;
             // if i < 10 || i > cur.elem_count() - 10 {
             //     print!("{:?},", x[i])
             // }
