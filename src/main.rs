@@ -293,6 +293,14 @@ fn view_2d(a: &GsTensor, ne0: usize, ne1: usize, nb1: usize, offset: usize) -> W
     Ok(t)
 }
 
+fn reshape_3d(a: &GsTensor, ne0: usize, ne1: usize, ne2: usize) -> WsResult<GsTensor> {
+    assert!(a.ggml_is_contiguous());
+    assert!(a.elem_count() == ne0 * ne1 * ne2);
+    let ne: [usize; 3] = [ne0, ne1, ne2];
+    let result = view_tensor(a.as_bytes(), a.n_dims(), a.dtype(), Shape::from_array(ne))?;
+    Ok(result)
+}
+
 struct TensorContext<'a> {
     offset: usize,
     size: usize,
@@ -1848,28 +1856,32 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         cur = mul(&mut ctx_l, &tmp, &cur)?;
         tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
         cur = add(&mut ctx_l, &tmp, &cur)?;
-
         let mut qcur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
         tmp = repeat(&mut ctx_l, &layer.attn_q_b, &qcur)?;
         qcur = add(&mut ctx_l, &tmp, &qcur)?;
-
-        let kcur = matmul(&mut ctx_l, &layer.attn_k_w, &cur)?;
-
+        let Kcur = matmul(&mut ctx_l, &layer.attn_k_w, &cur)?;
         let mut vcur = matmul(&mut ctx_l, &layer.attn_v_w, &cur)?;
-
         tmp = repeat(&mut ctx_l, &layer.attn_v_b, &vcur)?;
         vcur = add(&mut ctx_l, &tmp, &vcur)?;
-
         tmp = cpy(
             &qcur,
             &new_tensor_3d(&mut ctx_l, DType::F16, n_state / n_head, n_head, n_ctx)?,
         )?;
-
         let Q = tmp.permute(0, 2, 1, 3)?;
-
-        let x: &[F16] = unsafe { Q.as_slice::<F16>() };
+        tmp = cpy(
+            &Kcur,
+            &new_tensor_3d(&mut ctx_l, DType::F16, n_state / n_head, n_head, n_ctx)?,
+        )?;
+        let K = tmp.permute(0, 2, 1, 3)?;
+        tmp = reshape_3d(&vcur, n_state / n_head, n_head, n_ctx)?;
+        tmp = tmp.permute(1, 2, 0, 3)?;
+        let V = cpy(
+            &tmp,
+            &new_tensor_3d(&mut ctx_l, DType::F16, n_ctx, n_state / n_head, n_head)?,
+        )?;
+        let x: &[F16] = unsafe { V.as_slice::<F16>() };
         let mut sum: f64 = 0.0;
-        for i in 0..Q.elem_count() {
+        for i in 0..V.elem_count() {
             sum += x[i].to_f32().abs() as f64;
             // if i < 10 || i > cur.elem_count() - 10 {
             //     print!("{:?},", x[i])
@@ -1877,10 +1889,10 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         }
 
         println!(
-            "vcur,sum:{:?},shape:{:?},stride:{:?}",
+            "K,sum:{:?},shape:{:?},stride:{:?}",
             sum,
-            vcur.ggml_shape(),
-            vcur.dim().stride_4d()
+            K.ggml_shape(),
+            K.dim().stride_4d()
         );
         break;
     }
