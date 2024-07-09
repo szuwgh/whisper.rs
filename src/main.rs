@@ -1784,6 +1784,18 @@ fn norm(ctx: &mut TensorContext, a: &GsTensor) -> WsResult<GsTensor> {
     Ok(dst)
 }
 
+fn flash_attn(
+    ctx: &mut TensorContext,
+    q: &GsTensor,
+    k: &GsTensor,
+    v: &GsTensor,
+) -> WsResult<GsTensor> {
+    //assert!()
+    let mut dst = new_tensor(ctx, 4, DType::F32, Shape::from_slice(q.shape()))?;
+    galois::op::galois_flash_attn(q, k, v, &mut dst)?;
+    Ok(dst)
+}
+
 fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize) -> WsResult<()> {
     let model = &wctx.model;
     let mel_inp = &wctx.mel;
@@ -1850,50 +1862,73 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         let mut ctx_l: TensorContext = TensorContext::new(&wctx.buf_compute_layer);
         let layer = model.layers_encoder.get(i1).unwrap();
         // norm
-
-        cur = norm(&mut ctx_l, inp_L)?;
-        tmp = repeat(&mut ctx_l, &layer.attn_ln_0_w, &cur)?;
-        cur = mul(&mut ctx_l, &tmp, &cur)?;
-        tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
-        cur = add(&mut ctx_l, &tmp, &cur)?;
-        let mut qcur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
-        tmp = repeat(&mut ctx_l, &layer.attn_q_b, &qcur)?;
-        qcur = add(&mut ctx_l, &tmp, &qcur)?;
-        let Kcur = matmul(&mut ctx_l, &layer.attn_k_w, &cur)?;
-        let mut vcur = matmul(&mut ctx_l, &layer.attn_v_w, &cur)?;
-        tmp = repeat(&mut ctx_l, &layer.attn_v_b, &vcur)?;
-        vcur = add(&mut ctx_l, &tmp, &vcur)?;
-        tmp = cpy(
-            &qcur,
-            &new_tensor_3d(&mut ctx_l, DType::F16, n_state / n_head, n_head, n_ctx)?,
-        )?;
-        let Q = tmp.permute(0, 2, 1, 3)?;
-        tmp = cpy(
-            &Kcur,
-            &new_tensor_3d(&mut ctx_l, DType::F16, n_state / n_head, n_head, n_ctx)?,
-        )?;
-        let K = tmp.permute(0, 2, 1, 3)?;
-        tmp = reshape_3d(&vcur, n_state / n_head, n_head, n_ctx)?;
-        tmp = tmp.permute(1, 2, 0, 3)?;
-        let V = cpy(
-            &tmp,
-            &new_tensor_3d(&mut ctx_l, DType::F16, n_ctx, n_state / n_head, n_head)?,
-        )?;
-        let x: &[F16] = unsafe { V.as_slice::<F16>() };
-        let mut sum: f64 = 0.0;
-        for i in 0..V.elem_count() {
-            sum += x[i].to_f32().abs() as f64;
-            // if i < 10 || i > cur.elem_count() - 10 {
-            //     print!("{:?},", x[i])
-            // }
+        {
+            cur = norm(&mut ctx_l, inp_L)?;
+            tmp = repeat(&mut ctx_l, &layer.attn_ln_0_w, &cur)?;
+            cur = mul(&mut ctx_l, &tmp, &cur)?;
+            tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
+            cur = add(&mut ctx_l, &tmp, &cur)?;
         }
 
-        println!(
-            "K,sum:{:?},shape:{:?},stride:{:?}",
-            sum,
-            K.ggml_shape(),
-            K.dim().stride_4d()
-        );
+        // self-attention
+        {
+            let mut qcur = matmul(&mut ctx_l, &layer.attn_q_w, &cur)?;
+            tmp = repeat(&mut ctx_l, &layer.attn_q_b, &qcur)?;
+            qcur = add(&mut ctx_l, &tmp, &qcur)?;
+            let Kcur = matmul(&mut ctx_l, &layer.attn_k_w, &cur)?;
+            let mut vcur = matmul(&mut ctx_l, &layer.attn_v_w, &cur)?;
+            tmp = repeat(&mut ctx_l, &layer.attn_v_b, &vcur)?;
+            vcur = add(&mut ctx_l, &tmp, &vcur)?;
+            tmp = cpy(
+                &qcur,
+                &new_tensor_3d(&mut ctx_l, DType::F16, n_state / n_head, n_head, n_ctx)?,
+            )?;
+
+            //USE_FLASH_ATTN
+            {
+                let Q = tmp.permute(0, 2, 1, 3)?;
+
+                tmp = cpy(
+                    &Kcur,
+                    &new_tensor_3d(&mut ctx_l, DType::F16, n_state / n_head, n_head, n_ctx)?,
+                )?;
+
+                let K = tmp.permute(0, 2, 1, 3)?;
+
+                tmp = reshape_3d(&vcur, n_state / n_head, n_head, n_ctx)?;
+                tmp = tmp.permute(1, 2, 0, 3)?;
+
+                let V = cpy(
+                    &tmp,
+                    &new_tensor_3d(&mut ctx_l, DType::F16, n_ctx, n_state / n_head, n_head)?,
+                )?;
+
+                let mut KQV = flash_attn(&mut ctx_l, &Q, &K, &V)?;
+
+                let KQV_merged = KQV.permute(0, 2, 1, 3)?;
+
+                cur = cpy(
+                    &KQV_merged,
+                    &new_tensor_2d(&mut ctx_l, DType::F32, n_state, n_ctx)?,
+                )?;
+
+                let x: &[f32] = unsafe { cur.as_slice::<f32>() };
+                let mut sum: f64 = 0.0;
+                for i in 0..cur.elem_count() {
+                    sum += x[i].abs() as f64;
+                }
+
+                println!(
+                    "cur,sum:{:?},shape:{:?},stride:{:?}",
+                    sum,
+                    cur.ggml_shape(),
+                    cur.dim().stride_4d()
+                );
+            }
+        }
+
+        // projection
+
         break;
     }
 
