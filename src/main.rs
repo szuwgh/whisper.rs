@@ -1856,14 +1856,14 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         e_pe_offset,
     )?;
 
-    cur = add(&mut ctx0, &e_pe, &cur.transpose(0, 1)?)?;
-    let inp_L = &cur;
+    let mut inpL = add(&mut ctx0, &e_pe, &cur.transpose(0, 1)?)?;
+    //let inp_L = &cur;
     for i1 in 0..n_layer {
         let mut ctx_l: TensorContext = TensorContext::new(&wctx.buf_compute_layer);
         let layer = model.layers_encoder.get(i1).unwrap();
         // norm
         {
-            cur = norm(&mut ctx_l, inp_L)?;
+            cur = norm(&mut ctx_l, &inpL)?;
             tmp = repeat(&mut ctx_l, &layer.attn_ln_0_w, &cur)?;
             cur = mul(&mut ctx_l, &tmp, &cur)?;
             tmp = repeat(&mut ctx_l, &layer.attn_ln_0_b, &cur)?;
@@ -1911,26 +1911,79 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
                     &KQV_merged,
                     &new_tensor_2d(&mut ctx_l, DType::F32, n_state, n_ctx)?,
                 )?;
-
-                let x: &[f32] = unsafe { cur.as_slice::<f32>() };
-                let mut sum: f64 = 0.0;
-                for i in 0..cur.elem_count() {
-                    sum += x[i].abs() as f64;
-                }
-
-                println!(
-                    "cur,sum:{:?},shape:{:?},stride:{:?}",
-                    sum,
-                    cur.ggml_shape(),
-                    cur.dim().stride_4d()
-                );
             }
         }
 
         // projection
 
-        break;
+        {
+            cur = matmul(&mut ctx_l, &layer.attn_ln_1_w, &cur)?;
+            tmp = repeat(&mut ctx_l, &layer.attn_ln_1_b, &cur)?;
+            cur = add(&mut ctx_l, &tmp, &cur)?;
+        }
+
+        // add the input
+        let inpFF = add(&mut ctx_l, &cur, &inpL)?;
+
+        // feed-forward network
+        {
+            // norm
+            {
+                cur = norm(&mut ctx_l, &inpFF)?;
+                tmp = repeat(&mut ctx_l, &layer.mlp_ln_w, &cur)?;
+                tmp = mul(&mut ctx_l, &tmp, &cur)?;
+                let tmp2 = repeat(&mut ctx_l, &layer.mlp_ln_b, &cur)?;
+                cur = add(&mut ctx_l, &tmp, &tmp2)?;
+                // cur = mlp_ln_w*cur + mlp_ln_b
+            }
+            // fully connected
+            cur = matmul(&mut ctx_l, &layer.mlp_0_w, &cur)?;
+            tmp = repeat(&mut ctx_l, &layer.mlp_0_b, &cur)?;
+            cur = add(&mut ctx_l, &tmp, &cur)?;
+            // GELU activation
+            cur = gelu(&mut ctx_l, &cur)?;
+            // projection
+            cur = matmul(&mut ctx_l, &layer.mlp_1_w, &cur)?;
+
+            tmp = repeat(&mut ctx_l, &layer.mlp_1_b, &cur)?;
+            cur = add(&mut ctx_l, &tmp, &cur)?;
+        }
+        // output from this layer
+        let inpO = add(&mut ctx_l, &cur, &inpFF)?;
+
+        // layer end
+        let nbytes = inpL.nbytes();
+        inpL.as_bytes_mut()[..nbytes].copy_from_slice(&inpO.as_bytes()[..nbytes]);
+
+        println!("end :{}", i1)
     }
+    // layer end
+    cur = inpL;
+    // norm
+    {
+        cur = norm(&mut ctx0, &cur)?;
+        tmp = repeat(&mut ctx0, &model.e_ln_w, &cur)?;
+        tmp = mul(&mut ctx0, &tmp, &cur)?;
+        let tmp2 = repeat(&mut ctx0, &model.e_ln_b, &cur)?;
+        cur = add(&mut ctx0, &tmp, &tmp2)?;
+        // cur = mlp_ln_w*cur + mlp_ln_b
+    }
+
+    // pre-compute cross-attention memory
+
+    let x: &[f32] = unsafe { cur.as_slice::<f32>() };
+    let mut sum: f64 = 0.0;
+    for i in 0..cur.elem_count() {
+        sum += x[i].abs() as f64;
+    }
+
+    println!(
+        "cur,sum:{:?},sha
+        pe:{:?},stride:{:?}",
+        sum,
+        cur.ggml_shape(),
+        cur.dim().stride_4d()
+    );
 
     Ok(())
 }
