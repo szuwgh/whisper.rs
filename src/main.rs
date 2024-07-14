@@ -2029,34 +2029,34 @@ fn whisper_encode(wctx: &mut WhisperContext, n_threads: usize, mel_offset: usize
         let k1 = cpy(&Kcross, &k)?;
         let v1 = cpy(&Vcross, &v)?;
 
-        let x: &[f32] = unsafe { k.as_slice::<f32>() };
-        let mut sum: f64 = 0.0;
-        for i in 0..k.elem_count() {
-            sum += x[i].abs() as f64;
-        }
+        // let x: &[f32] = unsafe { k.as_slice::<f32>() };
+        // let mut sum: f64 = 0.0;
+        // for i in 0..k.elem_count() {
+        //     sum += x[i].abs() as f64;
+        // }
 
-        println!(
-            "k1,sum:{:?},sha
-            pe:{:?},stride:{:?}",
-            sum,
-            k1.ggml_shape(),
-            k1.dim().stride_4d()
-        );
+        // println!(
+        //     "k1,sum:{:?},sha
+        //     pe:{:?},stride:{:?}",
+        //     sum,
+        //     k1.ggml_shape(),
+        //     k1.dim().stride_4d()
+        // );
 
-        let x: &[f32] = unsafe { v.as_slice::<f32>() };
-        let mut sum: f64 = 0.0;
-        for i in 0..v.elem_count() {
-            sum += x[i].abs() as f64;
-        }
+        // let x: &[f32] = unsafe { v.as_slice::<f32>() };
+        // let mut sum: f64 = 0.0;
+        // for i in 0..v.elem_count() {
+        //     sum += x[i].abs() as f64;
+        // }
 
-        println!(
-            "v1,sum:{:?},sha
-            pe:{:?},stride:{:?}",
-            sum,
-            v1.ggml_shape(),
-            v1.dim().stride_4d()
-        );
-        break;
+        // println!(
+        //     "v1,sum:{:?},sha
+        //     pe:{:?},stride:{:?}",
+        //     sum,
+        //     v1.ggml_shape(),
+        //     v1.dim().stride_4d()
+        // );
+        // break;
     }
 
     Ok(())
